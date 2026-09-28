@@ -118,16 +118,23 @@ def test_find_best_bets_ranks_cheap_high_confidence_over_near_certain(monkeypatc
     assert Decimal(cheap["payout_ratio"]) == payout_ratio.quantize(Decimal("0.0001"))
     assert Decimal(cheap["score"]) == expected
     assert Decimal(cheap["assumed_edge"]) == confidence - stake
-    assert Decimal(cheap["suggested_max_dollars_risked"]) == Decimal("4.95")
-    assert cheap["suggested_contracts"] == 33
+    assert cheap["flb_band"] == "10–25¢"
+    assert cheap["stake_mode"] == "fixed_2"
+    assert Decimal(cheap["suggested_max_dollars_risked"]) == Decimal("1.95")
+    assert cheap["suggested_contracts"] == 13
     assert cheap["do_not_place"] == DO_NOT_PLACE
     assert "three reports agree" in cheap["rationale"]
     assert Decimal(cheap["score"]) > Decimal(out["recommendations"][1]["score"])
 
     narrow = find_best_bets({"beliefs": _beliefs()}, now=NOW)
-    assert [row["ticker"] for row in narrow["recommendations"]] == ["CHEAP-HIGH"]
+    assert narrow["filters"]["max_price"] == "0.84"
+    assert [row["ticker"] for row in narrow["recommendations"]] == ["CHEAP-HIGH", "HEAVY-NEAR"]
     assert narrow["cache"] == "hit"
     assert narrow["requests"] == 0
+    capped = find_best_bets({"beliefs": _beliefs(), "max_price": "0.50"}, now=NOW)
+    assert capped["filters"]["max_price"] == "0.5"
+    assert [row["ticker"] for row in capped["recommendations"]] == ["CHEAP-HIGH"]
+    assert capped["cache"] == "hit"
     assert len(calls) == 1
 
 

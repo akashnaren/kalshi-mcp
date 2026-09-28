@@ -11,9 +11,10 @@ import urllib.parse
 
 from decimal import Decimal
 
-from kalshi_readonly.caps import enforce_open, note_open, opening_notional, summarize_book
+from kalshi_readonly.caps import enforce_open, load_caps, note_open, opening_notional, summarize_book
 from kalshi_readonly.guard import require_mutation
 from kalshi_readonly.http import auth_call, auth_get
+from kalshi_readonly.score import fee_dome_cents, maker_fee_cents, series_fees
 
 _COUNT_RE = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d{1,2})?$")
 _PRICE_RE = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d{1,4})?$")
@@ -151,6 +152,8 @@ def _optional_group(args: dict) -> str | None:
     if "corr_group" not in args or args["corr_group"] in (None, ""):
         return None
     value = args["corr_group"]
+    if isinstance(value, str) and value.strip().lower() in {"none", "null"}:
+        return None
     if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_]{2,48}", value):
         raise RuntimeError("corr_group must be a snake_case risk driver")
     return value
@@ -163,9 +166,17 @@ def _load_book() -> dict:
     return summarize_book(positions, fills, orders)
 
 
-def _guard_open(*, ticker: str, side: str, count: str, price: str, corr_group: str | None, reduce_only: bool | None) -> Decimal:
+def _guard_open(
+    *,
+    ticker: str,
+    side: str,
+    count: str,
+    price: str,
+    corr_group: str | None,
+    reduce_only: bool | None,
+) -> tuple[dict | None, Decimal]:
     if reduce_only is True:
-        return Decimal(0)
+        return None, Decimal(0)
     notional = opening_notional(side, Decimal(count), Decimal(price))
     entry = Decimal(price) if side == "bid" else Decimal(1) - Decimal(price)
     try:
@@ -175,7 +186,51 @@ def _guard_open(*, ticker: str, side: str, count: str, price: str, corr_group: s
             raise
         raise RuntimeError(f"refusing to add risk because the book could not be loaded: {exc}") from None
     enforce_open(notional=notional, price=entry, ticker=ticker, book=book, corr_group=corr_group)
-    return notional
+    return book, notional
+
+
+def _execution_echo(
+    result: dict,
+    *,
+    ticker: str,
+    price: str,
+    count: str,
+    post_only: bool | None,
+    book: dict | None,
+    notional: Decimal,
+) -> dict:
+    """Fee and role for the proof log. day_spend_remaining comes from the book just loaded."""
+    out = dict(result)
+    m_taker, m_maker, source = series_fees({"ticker": ticker})
+    maker = post_only is True
+    out["role"] = "maker" if maker else "taker"
+    out["m_taker"] = format(m_taker, "f")
+    out["m_maker"] = format(m_maker, "f")
+    out["fee_m_source"] = source
+    if maker:
+        fee = maker_fee_cents(Decimal(price), Decimal(count), multiplier=m_maker)
+        out["fee_cents_est"] = format(fee, "f")
+        out["fee_note"] = (
+            "maker ceil(M_maker * 0.0175 * contracts * P * (1 - P) * 100) cents; "
+            f"M_maker={format(m_maker, 'f')} ({source})"
+        )
+    else:
+        fee = fee_dome_cents(Decimal(price), Decimal(count), multiplier=m_taker)
+        out["fee_cents_est"] = format(fee, "f")
+        out["fee_note"] = (
+            "taker ceil(M_taker * 0.07 * contracts * P * (1 - P) * 100) cents; "
+            f"M_taker={format(m_taker, 'f')} ({source})"
+        )
+    if book is not None:
+        caps = load_caps()
+        daily = book.get("daily", Decimal(0))
+        if notional > 0:
+            daily = daily + notional
+        remaining = (caps["daily"] - daily).quantize(Decimal("0.01"))
+        if remaining < 0:
+            remaining = Decimal("0.00")
+        out["day_spend_remaining"] = format(remaining, "f")
+    return out
 
 
 def list_open_orders(args: dict | None = None) -> dict:
@@ -210,6 +265,9 @@ def place_order(args: dict | None = None) -> dict:
         raise RuntimeError("expiration_time requires time_in_force good_till_canceled")
     if reduce_only is True and time_in_force != "immediate_or_cancel":
         raise RuntimeError("reduce_only requires time_in_force immediate_or_cancel")
+    post_only = _optional_bool(args, "post_only")
+    if post_only is True and time_in_force != "good_till_canceled":
+        raise RuntimeError("post_only refuses a taker order; use time_in_force good_till_canceled")
     body: dict[str, object] = {
         "ticker": ticker,
         "side": side,
@@ -237,7 +295,9 @@ def place_order(args: dict | None = None) -> dict:
     if exchange_index is not None:
         body["exchange_index"] = exchange_index
     corr_group = _optional_group(args)
-    notional = _guard_open(
+    if reduce_only is not True and corr_group is None:
+        raise RuntimeError("corr_group is required on opening risk")
+    book, notional = _guard_open(
         ticker=ticker,
         side=side,
         count=count,
@@ -251,7 +311,15 @@ def place_order(args: dict | None = None) -> dict:
         raise
     if notional > 0:
         note_open(ticker=ticker, notional=notional, corr_group=corr_group, client_order_id=client_order_id)
-    return result
+    return _execution_echo(
+        result,
+        ticker=ticker,
+        price=price,
+        count=count,
+        post_only=post_only,
+        book=book,
+        notional=notional,
+    )
 
 
 def cancel_order(args: dict | None = None) -> dict:
@@ -287,15 +355,27 @@ def amend_order(args: dict | None = None) -> dict:
     exchange_index = _optional_int(args, "exchange_index", -1, 63)
     if exchange_index is not None:
         body["exchange_index"] = exchange_index
-    _guard_open(
+    corr_group = _optional_group(args)
+    if corr_group is None:
+        raise RuntimeError("corr_group is required on opening risk")
+    book, notional = _guard_open(
         ticker=str(body["ticker"]),
         side=str(body["side"]),
         count=str(body["count"]),
         price=str(body["price"]),
-        corr_group=_optional_group(args),
+        corr_group=corr_group,
         reduce_only=False,
     )
-    return auth_call("POST", _order_path(order_id, "/amend"), _subaccount_query(args) or None, body)
+    result = auth_call("POST", _order_path(order_id, "/amend"), _subaccount_query(args) or None, body)
+    return _execution_echo(
+        result,
+        ticker=str(body["ticker"]),
+        price=str(body["price"]),
+        count=str(body["count"]),
+        post_only=None,
+        book=book,
+        notional=notional,
+    )
 
 
 def decrease_order(args: dict | None = None) -> dict:
@@ -342,7 +422,9 @@ _MUTATION_NOTE = (
     "Requires KALSHI_SAFE_MODE=0 and confirm=true (boolean). "
     "The server never sets confirm. "
     "Opening risk is capped at a $2 default, a $15 hard max, 15% of the sleeve in one market, "
-    "and 30% in one corr_group. Size above $2 needs a profitable fill history. "
+    "and 30% in one corr_group. corr_group is required when the order opens risk. "
+    "Missing, empty, and none are refused. Mutually exclusive children share one group. "
+    "Size above $2 needs a profitable fill history. "
     "Prices under 25 cents stay at $2. No withdraw or deposit."
 )
 
@@ -355,8 +437,12 @@ MUTATING_TOOLS = [
             "price is a YES-side dollar string strictly between 0 and 1. "
             "count is contracts (fixed-point string or integer). "
             "time_in_force is fill_or_kill, good_till_canceled, or immediate_or_cancel. "
+            "Recommended maker path: time_in_force good_till_canceled and post_only true. "
+            "post_only with fill_or_kill or immediate_or_cancel is refused, and Kalshi rejects a post_only order that would cross. "
             "self_trade_prevention_type is taker_at_cross or maker. "
             "Pass client_order_id yourself if you need dedup. "
+            "A successful place echoes role (maker or taker), fee_cents_est from the series catalog on the ticker, "
+            "and day_spend_remaining from the live book. "
             + _MUTATION_NOTE
         ),
         "inputSchema": {
@@ -379,7 +465,16 @@ MUTATING_TOOLS = [
                 "subaccount": {"type": "integer"},
                 "order_group_id": {"type": "string"},
                 "exchange_index": {"type": "integer"},
-                "corr_group": {"type": "string", "description": "Snake_case risk driver. Shares a 30% sleeve cap."},
+                "corr_group": {
+                    "type": "string",
+                    "description": (
+                        "Snake_case risk driver. Required on opening risk. "
+                        "Missing, empty, and none are refused. "
+                        "Mutually exclusive children of one parent share one group. "
+                        "Examples: nfl_week_N, city_weather_YYYYMMDD, fed_meeting_YYYYMM. "
+                        "Shares a 30% sleeve cap. A full co-resolution matrix is later."
+                    ),
+                },
                 "confirm": _CONFIRM,
             },
             "required": [
@@ -389,6 +484,7 @@ MUTATING_TOOLS = [
                 "price",
                 "time_in_force",
                 "self_trade_prevention_type",
+                "corr_group",
                 "confirm",
             ],
         },
@@ -434,9 +530,18 @@ MUTATING_TOOLS = [
                 "updated_client_order_id": {"type": "string"},
                 "exchange_index": {"type": "integer"},
                 "subaccount": {"type": "integer"},
+                "corr_group": {
+                    "type": "string",
+                    "description": (
+                        "Snake_case risk driver. Required because an amend is checked as opening risk. "
+                        "Missing, empty, and none are refused. "
+                        "Examples: nfl_week_N, city_weather_YYYYMMDD, fed_meeting_YYYYMM. "
+                        "Shares a 30% sleeve cap."
+                    ),
+                },
                 "confirm": _CONFIRM,
             },
-            "required": ["order_id", "ticker", "side", "price", "count", "confirm"],
+            "required": ["order_id", "ticker", "side", "price", "count", "corr_group", "confirm"],
         },
     },
     {

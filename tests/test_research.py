@@ -4,9 +4,21 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from kalshi_readonly.recommend import find_best_bets
+import pytest
+
+from kalshi_readonly.recommend import FIND_BEST_TOOL, find_best_bets
 from kalshi_readonly.routine import FE_ROUTINE, fe_routine
-from kalshi_readonly.score import edge_net_cents, fee_dome_cents, flb_band
+from kalshi_readonly.score import (
+    depth_haircut_cents,
+    edge_net_cents,
+    fee_dome_cents,
+    flb_band,
+    hold_to_res_default,
+    maker_fee_cents,
+    parse_beliefs,
+    series_fees,
+    taker_longshot_allowed,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,12 +45,21 @@ def _market(ticker: str, **overrides) -> dict:
 
 
 def test_fee_dome_and_band() -> None:
+    assert Decimal("0.07") * Decimal("0.25") * Decimal(100) == Decimal("1.75")
     assert fee_dome_cents(Decimal("0.50")) == Decimal(2)
     assert fee_dome_cents(Decimal("0.15")) == Decimal(1)
     assert flb_band(Decimal("0.08")) == "<10¢"
     assert flb_band(Decimal("0.15")) == "10–25¢"
     net = edge_net_cents(Decimal("0.70"), Decimal("0.15"), Decimal("0.14"))
     assert net > Decimal(8)
+    assert fee_dome_cents(Decimal("0.50"), multiplier=Decimal(2)) == Decimal(4)
+    assert maker_fee_cents(Decimal("0.50"), multiplier=None) == Decimal(0)
+    assert maker_fee_cents(Decimal("0.50"), multiplier=Decimal(1)) == Decimal(1)
+    assert depth_haircut_cents(Decimal("80")) == Decimal(0)
+    assert depth_haircut_cents(Decimal("1")) == Decimal(2)
+    deep = edge_net_cents(Decimal("0.70"), Decimal("0.15"), Decimal("0.14"), depth=Decimal("80"))
+    thin = edge_net_cents(Decimal("0.70"), Decimal("0.15"), Decimal("0.14"), depth=Decimal("1"))
+    assert deep - thin == Decimal("2.00")
 
 
 def test_ranked_row_carries_edge_net_and_quarter_kelly(monkeypatch) -> None:
@@ -68,11 +89,33 @@ def test_ranked_row_carries_edge_net_and_quarter_kelly(monkeypatch) -> None:
     assert Decimal(row["score"]) > 0
     assert row["flb_band"] == "10–25¢"
     assert row["stake_mode"] == "fixed_2"
+    assert Decimal(row["suggested_max_dollars_risked"]) == Decimal("1.95")
+    assert row["suggested_contracts"] == 13
+    assert Decimal(row["edge_net_cents"]) > 0
     assert row["kelly_frac"] == "0.25"
     assert Decimal(row["edge_net_cents"]) > 0
     assert row["key"] == "nhc_cone_includes_city"
     assert row["corr_group"] == "city_weather_week"
     assert "0.07" in row["fee_dome"]
+    assert row["side_exec"] == "maker"
+    assert row["SIDE_EXEC"] == "maker"
+    assert row["maker_flag"] is True
+    assert row["days_to_res"] == "7.00"
+    assert row["DAYS_TO_RES"] == "7.00"
+    assert row["spread_cents"] == "1.00"
+    assert row["depth_at_ask"] == "80.0000"
+    assert row["fee_cents_est"] == "0"
+    assert row["m_taker"] == "1"
+    assert row["m_maker"] == "0"
+    assert row["fee_m_source"] == "default"
+    assert "take_profit" not in row
+    assert "tp_pct" not in row
+    assert row["corr_group_hint"] == "city_weather_week"
+    assert row["hold_to_res_default"] is False
+    assert row["HOLD_TO_RES_DEFAULT"] is False
+    assert row["volume_floor"] == "24h"
+    assert "volume_lifetime" in row
+    assert "akash names the trade" not in row["do_not_place"].lower()
 
 
 def test_dominated_yes_is_dropped(monkeypatch) -> None:
@@ -159,7 +202,338 @@ def test_routine_names_the_daily_and_eod_hook() -> None:
         "no separate Kalshi role harness",
     ):
         assert phrase in FE_ROUTINE
+    assert payload["day_spend_remaining"] is None
+    assert payload["day_spend_todo"].startswith("TODO:")
+    assert "invent" in payload["day_spend_todo"]
     text = (ROOT / "harness" / "fe-grok-bot-routine.md").read_text(encoding="utf-8")
     start = text.index("```\n") + len("```\n")
     end = text.index("\n```", start)
     assert text[start:end] == FE_ROUTINE
+
+
+def test_find_best_bets_blurb_allows_finance_engineer_to_place() -> None:
+    text = FIND_BEST_TOOL["description"]
+    assert "akash names the trade" not in text.lower()
+    assert "confirm true" in text.lower()
+    assert "0.84" in FIND_BEST_TOOL["inputSchema"]["properties"]["max_price"]["description"]
+    assert "probability points" in FIND_BEST_TOOL["inputSchema"]["properties"]["min_edge"]["description"].lower()
+
+
+def test_taker_longshot_needs_the_flag_the_edge_and_a_two_dollar_stake(monkeypatch) -> None:
+    assert taker_longshot_allowed(allow_longshot=True, net_cents=Decimal("8")) is True
+    assert taker_longshot_allowed(allow_longshot=True, net_cents=Decimal("7.99")) is False
+    assert taker_longshot_allowed(allow_longshot=False, net_cents=Decimal("50")) is False
+
+    def fake_public_get(path: str, query=None):
+        return {
+            "markets": [
+                _market("LOTTO", yes_ask_dollars="0.0800", yes_bid_dollars="0"),
+                _market("LOTTO-THIN", yes_ask_dollars="0.0800", yes_bid_dollars="0", fee_multiplier="90"),
+            ],
+            "cursor": "",
+        }
+
+    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    belief = {"ticker": "LOTTO", "side": "yes", "confidence": 0.70, "evidence": "named tail"}
+    blocked = find_best_bets({"beliefs": [belief]}, now=NOW)
+    assert blocked["recommendations"] == []
+    assert blocked["counts"]["skipped_flb"] == 1
+
+    kept = find_best_bets({"beliefs": [{**belief, "allow_longshot": True}]}, now=NOW)
+    row = kept["recommendations"][0]
+    assert row["flb_band"] == "<10¢"
+    assert row["side_exec"] == "taker"
+    assert row["stake_mode"] == "fixed_2"
+    assert Decimal(row["assumed_edge"]) >= Decimal("0.08")
+    assert Decimal(row["edge_net_cents"]) >= Decimal("8")
+    assert Decimal(row["suggested_max_dollars_risked"]) <= Decimal("2")
+    assert row["suggested_contracts"] == 25
+
+    thin = find_best_bets(
+        {
+            "beliefs": [{
+                "ticker": "LOTTO-THIN",
+                "side": "yes",
+                "confidence": 0.60,
+                "evidence": "gross edge survives but net cents do not",
+                "allow_longshot": True,
+            }]
+        },
+        now=NOW,
+    )
+    assert thin["recommendations"] == []
+    assert thin["counts"]["skipped_flb"] == 1
+    assert thin["counts"]["skipped_edge"] == 0
+
+
+def test_max_price_default_is_documented_as_the_hard_ceiling() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "| `max_price` | 0.84 | 0.05 to 0.84 |" in readme
+    assert "previous default of 0.50" in readme
+
+
+def test_lifetime_volume_passes_when_the_24h_proxy_does_not(monkeypatch) -> None:
+    def fake_public_get(path: str, query=None):
+        return {
+            "markets": [
+                _market("SEASONED", volume_24h_fp="5.00", volume_fp="1500.00"),
+                _market("QUIET", volume_24h_fp="5.00", volume_fp="40.00"),
+            ],
+            "cursor": "",
+        }
+
+    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    out = find_best_bets(
+        {
+            "beliefs": [
+                {"ticker": "SEASONED", "side": "yes", "confidence": 0.70, "evidence": "lifetime book"},
+                {"ticker": "QUIET", "side": "yes", "confidence": 0.70, "evidence": "too thin"},
+            ],
+            "limit": 5,
+        },
+        now=NOW,
+    )
+    assert [row["ticker"] for row in out["recommendations"]] == ["SEASONED"]
+    row = out["recommendations"][0]
+    assert row["volume_floor"] == "lifetime"
+    assert row["volume_lifetime"] == "1500.0000"
+    assert row["volume_24h"] == "5.0000"
+    assert out["counts"]["skipped_liquidity"] == 1
+
+
+def test_maker_sorts_ahead_of_an_equal_score_taker(monkeypatch) -> None:
+    def fake_public_get(path: str, query=None):
+        return {
+            "markets": [
+                _market("A-TAKE", yes_bid_dollars="0"),
+                _market("Z-MAKE", yes_bid_dollars="0.1400"),
+            ],
+            "cursor": "",
+        }
+
+    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    out = find_best_bets(
+        {
+            "beliefs": [
+                {"ticker": "A-TAKE", "side": "yes", "confidence": 0.70, "evidence": "cross the ask"},
+                {"ticker": "Z-MAKE", "side": "yes", "confidence": 0.70, "evidence": "rest below the ask"},
+            ]
+        },
+        now=NOW,
+    )
+    rows = out["recommendations"]
+    assert [row["ticker"] for row in rows] == ["Z-MAKE", "A-TAKE"]
+    assert rows[0]["side_exec"] == "maker"
+    assert rows[1]["side_exec"] == "taker"
+    assert rows[0]["maker_flag"] is True
+    assert rows[1]["maker_flag"] is False
+    assert rows[0]["spread_cents"] == "1.00"
+    assert rows[0]["depth_at_ask"] == "80.0000"
+    assert rows[0]["score"] == rows[1]["score"]
+
+
+def test_series_multiplier_scales_taker_and_maker_fees(monkeypatch) -> None:
+    def fake_public_get(path: str, query=None):
+        return {
+            "markets": [
+                _market("M-MAKE", fee_multiplier="2"),
+                _market("M-TAKE", yes_bid_dollars="0", fee_multiplier="2"),
+            ],
+            "cursor": "",
+        }
+
+    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    out = find_best_bets(
+        {
+            "beliefs": [
+                {"ticker": "M-MAKE", "side": "yes", "confidence": 0.70, "evidence": "rest under a doubled series"},
+                {"ticker": "M-TAKE", "side": "yes", "confidence": 0.70, "evidence": "take a doubled series"},
+            ]
+        },
+        now=NOW,
+    )
+    by_ticker = {row["ticker"]: row for row in out["recommendations"]}
+    assert by_ticker["M-MAKE"]["maker_flag"] is True
+    assert by_ticker["M-MAKE"]["series_fee_multiplier"] == "2"
+    assert by_ticker["M-MAKE"]["fee_m_source"] == "payload"
+    assert by_ticker["M-MAKE"]["m_taker"] == "2"
+    assert by_ticker["M-MAKE"]["m_maker"] == "2"
+    assert by_ticker["M-MAKE"]["fee_cents_est"] == "1"
+    assert by_ticker["M-TAKE"]["maker_flag"] is False
+    assert by_ticker["M-TAKE"]["side_exec"] == "taker"
+    assert by_ticker["M-TAKE"]["fee_cents_est"] == "2"
+    assert by_ticker["M-TAKE"]["spread_cents"] is None
+    assert Decimal(by_ticker["M-TAKE"]["depth_at_ask"]) >= Decimal("3")
+
+
+def test_series_catalog_sets_split_maker_and_taker_m() -> None:
+    nfl = series_fees({"ticker": "KXNFLGAME-25SEP28KC", "series_ticker": "KXNFL"})
+    assert nfl == (Decimal(1), Decimal(1), "catalog")
+    assert series_fees({"ticker": "KXNFLGAME-1", "series_ticker": "KXHIGH"})[2] == "catalog"
+    assert series_fees({"ticker": "PLAIN", "series_ticker": "KXFEDDECISION"})[:2] == (Decimal(1), Decimal(1))
+    assert series_fees({"ticker": "KXNBAGAME-1"}) == (Decimal(1), Decimal(1), "catalog")
+    assert series_fees({"ticker": "KXMVE-1"}) == (Decimal(1), Decimal(2), "catalog")
+    assert series_fees({"ticker": "KXHIGHNY-26SEP28"}) == (Decimal(1), Decimal(0), "inference")
+    assert series_fees({"ticker": "KXBTCY-26"}) == (Decimal(0), Decimal(0), "catalog")
+    assert series_fees({"ticker": "KXETHY-26"}) == (Decimal(0), Decimal(0), "catalog")
+    assert series_fees({"ticker": "KXTEST"}) == (Decimal(1), Decimal(0), "default")
+    assert series_fees({"ticker": "KXNFLGAME-1", "fee_multiplier": "2"}) == (Decimal(2), Decimal(2), "payload")
+    assert hold_to_res_default(days=Decimal(7), net_cents=Decimal(1), fee_cents=Decimal(1)) is True
+    assert hold_to_res_default(days=Decimal(7), net_cents=Decimal(2), fee_cents=Decimal(1)) is False
+    assert hold_to_res_default(days=Decimal(8), net_cents=Decimal(1), fee_cents=Decimal(1)) is False
+    assert hold_to_res_default(days=Decimal(7), net_cents=Decimal(100), fee_cents=Decimal(1)) is False
+
+
+def test_catalog_fees_reach_ranked_rows_and_weather_gap_is_only_a_log(monkeypatch) -> None:
+    def fake_public_get(path: str, query=None):
+        return {
+            "markets": [
+                _market("KXNFLGAME-25SEP28KC"),
+                _market("KXHIGHNY-26SEP28"),
+                _market("KXBTCY-26", yes_bid_dollars="0"),
+                _market("PLAIN-TAKE", yes_bid_dollars="0"),
+            ],
+            "cursor": "",
+        }
+
+    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    out = find_best_bets(
+        {
+            "beliefs": [
+                {"ticker": "KXNFLGAME-25SEP28KC", "side": "yes", "confidence": 0.70, "evidence": "listed nfl maker"},
+                {
+                    "ticker": "KXHIGHNY-26SEP28",
+                    "side": "yes",
+                    "confidence": 0.70,
+                    "evidence": "weather gap is a log",
+                    "wx_gap_pp": 12,
+                },
+                {"ticker": "KXBTCY-26", "side": "yes", "confidence": 0.70, "evidence": "crypto year end is free"},
+                {"ticker": "PLAIN-TAKE", "side": "yes", "confidence": 0.70, "evidence": "unlisted taker still pays"},
+            ],
+            "limit": 10,
+        },
+        now=NOW,
+    )
+    by_ticker = {row["ticker"]: row for row in out["recommendations"]}
+    assert set(by_ticker) == {"KXNFLGAME-25SEP28KC", "KXHIGHNY-26SEP28", "KXBTCY-26", "PLAIN-TAKE"}
+    nfl = by_ticker["KXNFLGAME-25SEP28KC"]
+    assert nfl["side_exec"] == "maker"
+    assert nfl["fee_cents_est"] == "1"
+    assert nfl["m_maker"] == "1"
+    assert nfl["fee_m_source"] == "catalog"
+    assert "take_profit" not in nfl
+    weather = by_ticker["KXHIGHNY-26SEP28"]
+    assert weather["fee_cents_est"] == "0"
+    assert weather["fee_m_source"] == "inference"
+    assert weather["m_taker"] == "1"
+    assert weather["m_maker"] == "0"
+    assert weather["wx_gap_pp"] == "12"
+    assert "wx_gap_pp" not in nfl
+    crypto = by_ticker["KXBTCY-26"]
+    assert crypto["side_exec"] == "taker"
+    assert crypto["fee_cents_est"] == "0"
+    assert crypto["m_taker"] == "0"
+    assert crypto["fee_m_source"] == "catalog"
+    gap = Decimal(crypto["edge_net_cents"]) - Decimal(by_ticker["PLAIN-TAKE"]["edge_net_cents"])
+    assert gap == Decimal("1.00")
+    narrow = find_best_bets(
+        {
+            "beliefs": [{
+                "ticker": "KXHIGHNY-26SEP28",
+                "side": "yes",
+                "confidence": 0.70,
+                "evidence": "a three point gap still ranks",
+                "wx_gap_pp": 3,
+            }]
+        },
+        now=NOW,
+    )
+    assert narrow["recommendations"][0]["wx_gap_pp"] == "3"
+    assert narrow["counts"].get("skipped_flb", 0) == 0
+
+
+def test_belief_rejects_corr_group_none_and_a_non_numeric_weather_gap() -> None:
+    with pytest.raises(RuntimeError, match="corr_group must be a snake_case risk driver"):
+        parse_beliefs([{
+            "ticker": "KXHIGHNY-26SEP28",
+            "side": "yes",
+            "confidence": 0.7,
+            "corr_group": "none",
+        }])
+    with pytest.raises(RuntimeError, match="wx_gap_pp must be a number"):
+        parse_beliefs([{
+            "ticker": "KXHIGHNY-26SEP28",
+            "side": "yes",
+            "confidence": 0.7,
+            "wx_gap_pp": "wide",
+        }])
+
+
+def test_ten_to_twenty_five_cent_band_caps_risk_at_two_dollars(monkeypatch) -> None:
+    def fake_public_get(path: str, query=None):
+        return {
+            "markets": [
+                _market("BAND-20", yes_ask_dollars="0.2000", yes_bid_dollars="0"),
+                _market("BAND-40", yes_ask_dollars="0.4000", yes_bid_dollars="0"),
+                _market("BAND-25", yes_ask_dollars="0.2500", yes_bid_dollars="0"),
+            ],
+            "cursor": "",
+        }
+
+    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    out = find_best_bets(
+        {
+            "beliefs": [
+                {"ticker": "BAND-20", "side": "yes", "confidence": 0.70, "evidence": "inside the two dollar band"},
+                {"ticker": "BAND-40", "side": "yes", "confidence": 0.70, "evidence": "above the two dollar band"},
+                {"ticker": "BAND-25", "side": "yes", "confidence": 0.70, "evidence": "band starts at a quarter"},
+            ],
+            "max_risk_dollars": "5",
+            "limit": 5,
+        },
+        now=NOW,
+    )
+    by_ticker = {row["ticker"]: row for row in out["recommendations"]}
+    low = by_ticker["BAND-20"]
+    assert low["flb_band"] == "10–25¢"
+    assert low["stake_mode"] == "fixed_2"
+    assert low["suggested_contracts"] == 10
+    assert Decimal(low["suggested_max_dollars_risked"]) == Decimal("2.00")
+    mid = by_ticker["BAND-40"]
+    assert mid["flb_band"] == "25–75¢"
+    assert mid["stake_mode"] == "kelly"
+    assert Decimal(mid["suggested_max_dollars_risked"]) == Decimal("4.80")
+    edge = by_ticker["BAND-25"]
+    assert edge["flb_band"] == "25–75¢"
+    assert edge["stake_mode"] == "kelly"
+    assert Decimal(edge["suggested_max_dollars_risked"]) == Decimal("5.00")
+
+
+def test_nonpositive_edge_net_is_dropped_after_the_fee_and_the_spread(monkeypatch) -> None:
+    def fake_public_get(path: str, query=None):
+        return {
+            "markets": [
+                _market("NET-ZERO", yes_ask_dollars="0.5000", yes_bid_dollars="0.3800"),
+                _market("NET-NEG", yes_ask_dollars="0.5000", yes_bid_dollars="0.3600"),
+                _market("NET-POS", yes_ask_dollars="0.5000", yes_bid_dollars="0.4200"),
+            ],
+            "cursor": "",
+        }
+
+    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    out = find_best_bets(
+        {
+            "beliefs": [
+                {"ticker": "NET-ZERO", "side": "yes", "confidence": 0.58, "evidence": "gross edge is the minimum"},
+                {"ticker": "NET-NEG", "side": "yes", "confidence": 0.58, "evidence": "spread eats the gross edge"},
+                {"ticker": "NET-POS", "side": "yes", "confidence": 0.58, "evidence": "net still clears zero"},
+            ],
+            "limit": 5,
+        },
+        now=NOW,
+    )
+    assert [row["ticker"] for row in out["recommendations"]] == ["NET-POS"]
+    assert Decimal(out["recommendations"][0]["edge_net_cents"]) == Decimal("2.00")
+    assert out["counts"]["skipped_edge"] == 0
+    assert out["counts"]["skipped_edge_net"] == 2

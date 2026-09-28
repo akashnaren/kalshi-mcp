@@ -156,7 +156,7 @@ The Finance Engineer sleeve sets `KALSHI_SAFE_MODE=0` and restarts the host. `pl
 | --- | --- |
 | `exchange_status` | Public exchange status |
 | `list_markets` | Public markets. Optional `limit` (default 5), `status`, `ticker` |
-| `find_best_bets` | Read-only rank. See Bets. Does not place orders. Rows include `edge_net_cents`, `flb_band`, `kelly_frac`, and `stake_mode`. `rate_limited` is true when a later scan page hit the retry budget |
+| `find_best_bets` | Read-only rank. See Bets. Does not place orders. Rows include `edge_net_cents`, `flb_band`, `kelly_frac`, `stake_mode`, `side_exec`, `days_to_res`, `spread_cents`, `depth_at_ask`, `fee_cents_est`, `corr_group_hint`, and `hold_to_res_default`. `rate_limited` is true when a later scan page hit the retry budget |
 | `fe_routine` | Daily and end-of-day prompt for the Finance Engineer. Does not trade |
 | `cash_or_positions` | Cash and positions. `include`: `balance`, `cash`, `positions`, `both` (default), or `fills`. Optional `limit` (default 50) |
 | `list_open_orders` | Resting orders only (`status=resting`). Optional `ticker`, `limit` (default 100), `cursor`, `subaccount`. Read. No confirm |
@@ -181,9 +181,10 @@ Defaults, all overridable inside a fixed range:
 | --- | --- | --- |
 | `min_confidence` | 0.55 | 0.50 to 0.99 |
 | `min_edge` | 0.08 | 0 to 0.90 |
-| `max_price` | 0.50 | 0.05 to 0.84 |
+| `max_price` | 0.84 | 0.05 to 0.84 |
 | `max_risk_dollars` | 5 | 1 to 25 |
-| `min_volume` | 20 contracts of 24h volume | 0 to 1000000 |
+| `min_volume` | 20 contracts of 24h volume (weaker proxy) | 0 to 1000000 |
+| `min_lifetime_volume` | 1000 contracts lifetime | 0 to 100000000 |
 | `min_ask_size` | 1 | 0 to 100000 |
 | `min_hours_to_expiry` | 2 | 0 to 168 |
 | `max_hours_to_expiry` | 1440 (60 days) | above the minimum, up to 8760 |
@@ -197,7 +198,9 @@ Prices at or above 0.85 are never recommended. The scan also skips multivariate 
 
 HTTP 429 and 503 are tried at most 3 times. A `Retry-After` value is honored up to 3 seconds. Without that header, or when it is not a delay or a date, the wait is a short exponential backoff with jitter (0.25s, then 0.5s, capped at 3 seconds). The error is `rate_limited` only after that budget is spent.
 
-Every response includes `places_orders: false` and the sentence `do not place until Akash names the trade`. Each ranked row also reports `edge_net_cents` after the fee dome (`ceil(0.07 * contracts * price * (1 - price))` cents), `flb_band`, `kelly_frac` of 0.25, and `stake_mode`. A price at or under 10 cents is skipped unless that net edge is at least 8 cents. The rank score itself is unchanged. The Finance Engineer routine is `fe_routine` and `harness/fe-grok-bot-routine.md`.
+`fee_cents_est` is the official schedule for the suggested role, looked up by series prefix before the score: taker `ceil(M_taker * 0.07 * C * P * (1-P) * 100)` cents, maker `ceil(M_maker * 0.0175 * C * P * (1-P) * 100)`. At P=0.50, C=1, M_taker=1 the raw taker amount is 1.75 cents and the round-up is 2 cents. NFL, MLB, Fed, and CPI are usually M_taker=1 and M_maker=1. Weather (`KXHIGH`) is M_taker=1 and M_maker=0 by inference, because those series are absent from the Non-Standard table. Some crypto year-end series (`KXBTCY`, `KXETHY`) are 0/0. An unlisted series stays taker 1 and maker 0. A payload `fee_multiplier` (also `series_fee_multiplier` or `fee_multiplier_fp`) overrides both sides. `edge_net_cents` subtracts that taker dome, half the spread, and a depth haircut (0 when the ask shows at least 3 contracts, otherwise the shortfall capped at 2 cents). `maker_flag` is true when `side_exec` is `maker`. `hold_to_res_default` is true when days to resolution are at most 7 and the round-trip fee is larger than the remaining edge. There is no settlement fee and no fixed take-profit percent. `wx_gap_pp` is copied onto the row only when a belief passes it. It is not an entry gate.
+
+Every response includes `places_orders: false` and the sentence `Finance Engineer may place under the caps with confirm true`. The tool still does not place. Each ranked row reports `edge_net_cents` after the taker fee dome (`ceil(M_taker * 0.07 * contracts * price * (1 - price))` cents), `flb_band`, `kelly_frac` of 0.25, `stake_mode`, `side_exec` / `SIDE_EXEC`, `days_to_res` / `DAYS_TO_RES`, `spread_cents`, `depth_at_ask`, `fee_cents_est`, `m_taker`, `m_maker`, `fee_m_source`, `corr_group_hint`, and `hold_to_res_default` / `HOLD_TO_RES_DEFAULT`. `min_edge` (default 0.08) is probability points and is separate from `edge_net_cents`. A row with `edge_net_cents` at or below 0 is dropped after the fee, the spread, and the depth haircut. A taker quote in the `<10¢` band is dropped unless the belief sets `allow_longshot` true, `edge_net_cents` is at least 8, and the suggested stake is forced to $2. A `10–25¢` quote uses `stake_mode` `fixed_2` and caps `suggested_max_dollars_risked` at $2. Lifetime volume of at least 1000 passes; 24h `min_volume` is the weaker proxy, and both numbers are on the row. A maker quote whose taker fee is within 2 cents sorts 0.0001 ahead of an equal score. The displayed score stays the formula. `max_price` defaults to 0.84, the hard ceiling, so a 50¢–84¢ contract with edge is eligible. The previous default of 0.50 hid that band; pass `max_price` 0.50 to restore it. The Finance Engineer routine is `fe_routine` and `harness/fe-grok-bot-routine.md`.
 
 ## Trade
 
@@ -208,7 +211,7 @@ Opening risk is capped in process. The server does not set `confirm` for you.
 | Stake | $2 until fill history shows the sleeve is profitable. Prices under 25 cents stay at $2 |
 | Hard max | $15 per trade. A setting above 15 is ignored |
 | One market | 15% of the $71 sleeve |
-| One corr_group | 30% of the sleeve. Pass `corr_group` on `place_order` |
+| One corr_group | 30% of the sleeve. `corr_group` is required on opening risk (`place_order`, and `amend_order` because an amend is checked as new risk). Missing, empty, and `none` are refused. Mutually exclusive children share one group. Examples: `nfl_week_N`, `city_weather_YYYYMMDD`, `fed_meeting_YYYYMM`. A full co-resolution matrix is later |
 | New notional per UTC day | $10 |
 
 Cancels and decreases do not add risk and are not size-capped. An amend that would increase risk is capped. Size above the $2 default requires at least three closing trades and a positive net on this account.
@@ -223,15 +226,17 @@ The Finance Engineer harness is the only unlock. After that host sets `KALSHI_SA
 
 | Tool | Kalshi route | Required arguments |
 | --- | --- | --- |
-| `place_order` | `POST /portfolio/events/orders` | `ticker`, `side` (`bid` or `ask`), `count`, `price`, `time_in_force`, `self_trade_prevention_type`, `confirm` |
+| `place_order` | `POST /portfolio/events/orders` | `ticker`, `side` (`bid` or `ask`), `count`, `price`, `time_in_force`, `self_trade_prevention_type`, `corr_group`, `confirm` |
 | `cancel_order` | `DELETE /portfolio/events/orders/{order_id}` | `order_id`, `confirm`. Pass `market_ticker` so Kalshi can auto-route |
-| `amend_order` | `POST /portfolio/events/orders/{order_id}/amend` | `order_id`, `ticker`, `side`, `price`, `count`, `confirm` |
+| `amend_order` | `POST /portfolio/events/orders/{order_id}/amend` | `order_id`, `ticker`, `side`, `price`, `count`, `corr_group`, `confirm` |
 | `decrease_order` | `POST /portfolio/events/orders/{order_id}/decrease` | `order_id`, `confirm`, and exactly one of `reduce_by` or `reduce_to` |
 | `list_open_orders` | `GET /portfolio/orders?status=resting` | none |
 
 `bid` buys YES. `ask` sells YES. Prices are YES-book dollar strings strictly between 0 and 1, such as `0.4200`. `count` is a contract string such as `1.00` (a positive integer is accepted). Amend `count` is already filled plus the desired resting remainder, not a reduce-by amount. Decreasing size keeps queue position. A price change or a larger size does not. Use `decrease_order` to reduce.
 
-`time_in_force` is `fill_or_kill`, `good_till_canceled`, or `immediate_or_cancel`. `self_trade_prevention_type` is `taker_at_cross` or `maker`. `expiration_time` is only valid with `good_till_canceled`. `reduce_only` is only valid with `immediate_or_cancel`. Pass `client_order_id` yourself when you want dedup. This server does not invent one.
+`time_in_force` is `fill_or_kill`, `good_till_canceled`, or `immediate_or_cancel`. The maker path is `time_in_force=good_till_canceled` and `post_only=true`. `post_only` with `fill_or_kill` or `immediate_or_cancel` is refused here. Kalshi also rejects a `post_only` order that would cross, so a maker flag cannot silently take. `self_trade_prevention_type` is `taker_at_cross` or `maker`. `expiration_time` is only valid with `good_till_canceled`. `reduce_only` is only valid with `immediate_or_cancel` and does not require `corr_group`. Pass `client_order_id` yourself when you want dedup. This server does not invent one.
+
+A successful `place_order` echoes `role` (`maker` when `post_only` is true, otherwise `taker`), `fee_cents_est` from the series catalog on the ticker (unlisted maker M is 0; NFL, Fed, and CPI maker M is 1), and `day_spend_remaining` from the live book against the soft $10 UTC-day cap. `fe_routine` does not invent that remaining figure. Size above $2 still needs a profitable fill history. There is no withdraw and no deposit.
 
 Optional place fields: `client_order_id`, `expiration_time`, `post_only`, `reduce_only`, `cancel_order_on_pause`, `subaccount`, `order_group_id`, `exchange_index`.
 

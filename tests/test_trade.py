@@ -40,6 +40,7 @@ _PLACE = {
     "time_in_force": "good_till_canceled",
     "self_trade_prevention_type": "taker_at_cross",
     "client_order_id": "ord-1",
+    "corr_group": "sleeve_test",
     "confirm": True,
 }
 
@@ -273,6 +274,9 @@ def test_place_order_signs_post_and_omits_confirm(monkeypatch: pytest.MonkeyPatc
     blob = json.dumps(dict(req.header_items())) + req.data.decode("utf-8")
     assert "PRIVATE KEY" not in blob
     assert out["order_id"] == "ord-1"
+    assert out["role"] == "taker"
+    assert out["fee_cents_est"] == "2"
+    assert out["day_spend_remaining"] == "9.58"
 
 
 def test_cancel_order_signs_delete_without_query(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -319,6 +323,7 @@ def test_amend_and_decrease_hit_v2_paths(monkeypatch: pytest.MonkeyPatch) -> Non
             "side": "ask",
             "price": "0.6100",
             "count": "2",
+            "corr_group": "sleeve_test",
             "confirm": True,
         }
     )
@@ -466,3 +471,75 @@ def test_place_refuses_the_hard_max_before_sending_the_order(monkeypatch: pytest
         place_order({**_PLACE, "count": "40", "price": "0.5000"})
     assert seen
     assert all(req.get_method() == "GET" for req in seen)
+
+
+def test_place_rejects_opening_risk_without_corr_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_trading(monkeypatch)
+    _auth(monkeypatch)
+
+    def fail_open(*_args, **_kwargs):
+        raise AssertionError("http was called")
+
+    monkeypatch.setattr("kalshi_readonly.http._open", fail_open)
+    args = dict(_PLACE)
+    args.pop("corr_group")
+    with pytest.raises(RuntimeError, match="corr_group is required on opening risk"):
+        place_order(args)
+    with pytest.raises(RuntimeError, match="corr_group is required on opening risk"):
+        amend_order({**_PLACE, "order_id": "ord-1", "corr_group": ""})
+    with pytest.raises(RuntimeError, match="corr_group is required on opening risk"):
+        place_order({**_PLACE, "corr_group": "none"})
+    with pytest.raises(RuntimeError, match="corr_group is required on opening risk"):
+        place_order({**_PLACE, "corr_group": "NONE"})
+
+
+def test_post_only_refuses_a_taker_time_in_force(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_trading(monkeypatch)
+    _auth(monkeypatch)
+
+    def fail_open(*_args, **_kwargs):
+        raise AssertionError("http was called")
+
+    monkeypatch.setattr("kalshi_readonly.http._open", fail_open)
+    with pytest.raises(RuntimeError, match="post_only refuses a taker"):
+        place_order({**_PLACE, "post_only": True, "time_in_force": "immediate_or_cancel"})
+
+
+def test_post_only_echoes_maker_role_and_zero_fee(monkeypatch: pytest.MonkeyPatch) -> None:
+    _auth(monkeypatch)
+    _enable_trading(monkeypatch)
+    seen: list[urllib.request.Request] = []
+
+    def fake_open(req: urllib.request.Request, timeout: float = 20):
+        seen.append(req)
+        if req.get_method() == "GET":
+            return _empty_book()
+        return _Body({"order_id": "ord-1", "fill_count": "0.00", "remaining_count": "1.00"})
+
+    monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
+    out = place_order({**_PLACE, "post_only": True})
+    body = json.loads([req for req in seen if req.get_method() == "POST"][0].data)
+    assert body["post_only"] is True
+    assert body["time_in_force"] == "good_till_canceled"
+    assert "corr_group" not in body
+    assert out["role"] == "maker"
+    assert out["fee_cents_est"] == "0"
+    assert out["fee_m_source"] == "default"
+    assert out["day_spend_remaining"] == "9.58"
+
+
+def test_post_only_nfl_uses_catalog_maker_fee(monkeypatch: pytest.MonkeyPatch) -> None:
+    _auth(monkeypatch)
+    _enable_trading(monkeypatch)
+
+    def fake_open(req: urllib.request.Request, timeout: float = 20):
+        if req.get_method() == "GET":
+            return _empty_book()
+        return _Body({"order_id": "ord-1", "fill_count": "0.00", "remaining_count": "1.00"})
+
+    monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
+    out = place_order({**_PLACE, "ticker": "KXNFLGAME-25SEP28KC", "post_only": True, "corr_group": "nfl_week_4_2026"})
+    assert out["role"] == "maker"
+    assert out["fee_cents_est"] == "1"
+    assert out["m_maker"] == "1"
+    assert out["fee_m_source"] == "catalog"

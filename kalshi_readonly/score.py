@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN
 
-DO_NOT_PLACE = "do not place until Akash names the trade"
+DO_NOT_PLACE = "Finance Engineer may place under the caps with confirm true"
+LONGSHOT_NET_CENTS = Decimal(8)
+MAKER_NEAR_CENTS = Decimal("2")
+_DAY = Decimal(24)
 FORMULA = "estimated_confidence * payout_ratio / stake_needed"
 RESEARCH_NOTE = "no confidence supplied; not a recommendation"
 
@@ -24,12 +27,147 @@ _CENT = Decimal("0.01")
 _ONE = Decimal("1")
 
 
-def fee_dome_cents(price: Decimal, contracts: Decimal = Decimal(1)) -> Decimal:
-    """Kalshi taker fee in cents: ceil(0.07 * contracts * P * (1-P) * 100)."""
-    if not (Decimal(0) < price < Decimal(1)) or contracts <= 0:
+_TAKER_RATE = Decimal("0.07")
+_MAKER_RATE = Decimal("0.0175")
+_FEE_MULTIPLIER_KEYS = ("fee_multiplier", "series_fee_multiplier", "fee_multiplier_fp")
+_CORR_ABSENT = frozenset({"none", "null"})
+
+# Gaps-pack series fee catalog (Kalshi schedule effective 2026-07-07).
+# Longest matching prefix on series_ticker, ticker, or event_ticker wins.
+# catalog: listed in the Non-Standard table. inference: weather is absent from that table.
+# default (no match): M_taker 1, M_maker 0. payload: fee_multiplier overrides both sides.
+# KXMVE maker M is 2 for the whole prefix. The uncorrelated-NFL-combo exception is deferred.
+# KXNBAGAME was not in the PDF extract. It matches KXNBA, so maker M is 1. Do not assume a free maker.
+_SERIES_FEE_CATALOG: tuple[tuple[str, Decimal, Decimal, str], ...] = (
+    ("KXNFLGAME", Decimal(1), Decimal(1), "catalog"),
+    ("KXWNBAGAME", Decimal(1), Decimal(1), "catalog"),
+    ("KXNBAEAST", Decimal(1), Decimal(1), "catalog"),
+    ("KXNBAWEST", Decimal(1), Decimal(1), "catalog"),
+    ("KXMLBGAME", Decimal(1), Decimal(1), "catalog"),
+    ("KXNCAAFGAME", Decimal(1), Decimal(1), "catalog"),
+    ("KXUCLGAME", Decimal(1), Decimal(1), "catalog"),
+    ("KXATPMATCH", Decimal(1), Decimal(1), "catalog"),
+    ("KXWTAMATCH", Decimal(1), Decimal(1), "catalog"),
+    ("KXWCGAME", Decimal(1), Decimal(1), "catalog"),
+    ("KXCPIYOY", Decimal(1), Decimal(1), "catalog"),
+    ("KXFEDDECISION", Decimal(1), Decimal(1), "catalog"),
+    ("KXRATECUTCOUNT", Decimal(1), Decimal(1), "catalog"),
+    ("KXPAYROLLS", Decimal(1), Decimal(1), "catalog"),
+    ("KXNASDAQ100Y", Decimal(1), Decimal(1), "catalog"),
+    ("KXBTCMAX150", Decimal(1), Decimal(1), "catalog"),
+    ("KXGAMBLINGREPEAL", Decimal(0), Decimal(0), "catalog"),
+    ("KXELECTIRAN", Decimal(0), Decimal(0), "catalog"),
+    ("KXGREENLAND", Decimal(0), Decimal(0), "catalog"),
+    ("KXLALIGA", Decimal(1), Decimal(1), "catalog"),
+    ("KXNCAAF", Decimal(1), Decimal(1), "catalog"),
+    ("KXMLB", Decimal(1), Decimal(1), "catalog"),
+    ("KXNBA", Decimal(1), Decimal(1), "catalog"),
+    ("KXNFL", Decimal(1), Decimal(1), "catalog"),
+    ("KXCPI", Decimal(1), Decimal(1), "catalog"),
+    ("KXFED", Decimal(1), Decimal(1), "catalog"),
+    ("KXGDP", Decimal(1), Decimal(1), "catalog"),
+    ("KXINXY", Decimal(1), Decimal(1), "catalog"),
+    ("KXBTCY", Decimal(0), Decimal(0), "catalog"),
+    ("KXETHY", Decimal(0), Decimal(0), "catalog"),
+    ("KXHIGH", Decimal(1), Decimal(0), "inference"),
+    ("KXDOED", Decimal(0), Decimal(0), "catalog"),
+    ("KXMVE", Decimal(1), Decimal(2), "catalog"),
+    ("KXSB", Decimal(1), Decimal(1), "catalog"),
+    ("KXU3", Decimal(1), Decimal(1), "catalog"),
+)
+
+
+def _schedule_fee_cents(price: Decimal, contracts: Decimal, *, rate: Decimal, multiplier: Decimal) -> Decimal:
+    """ceil(M * rate * contracts * P * (1-P) * 100). Rate is 0.07 taker or 0.0175 maker."""
+    if multiplier <= 0 or not (Decimal(0) < price < Decimal(1)) or contracts <= 0:
         return Decimal(0)
-    raw = Decimal("0.07") * contracts * price * (Decimal(1) - price) * Decimal(100)
+    raw = multiplier * rate * contracts * price * (Decimal(1) - price) * Decimal(100)
     return raw.to_integral_value(rounding=ROUND_CEILING)
+
+
+def series_multiplier(market: dict | None) -> Decimal | None:
+    """Series fee multiplier M when the market payload has one. None means use the defaults."""
+    if not isinstance(market, dict):
+        return None
+    for key in _FEE_MULTIPLIER_KEYS:
+        raw = market.get(key)
+        if raw is None or raw == "" or isinstance(raw, bool):
+            continue
+        try:
+            if isinstance(raw, str):
+                value = Decimal(raw.strip())
+            elif isinstance(raw, int):
+                value = Decimal(raw)
+            elif isinstance(raw, float):
+                value = Decimal(format(raw, ".6f"))
+            else:
+                continue
+        except (InvalidOperation, ValueError):
+            continue
+        if value < 0 or value > 100:
+            continue
+        return value
+    return None
+
+
+def series_fees(market: dict | None) -> tuple[Decimal, Decimal, str]:
+    """(M_taker, M_maker, source) before fee_cents_est and edge_net.
+
+    A payload multiplier sets both sides and wins over the prefix catalog.
+    Otherwise the longest series prefix on series_ticker, ticker, or event_ticker wins.
+    """
+    payload = series_multiplier(market)
+    if payload is not None:
+        return payload, payload, "payload"
+    best: tuple[int, Decimal, Decimal, str] | None = None
+    if isinstance(market, dict):
+        for key in ("series_ticker", "ticker", "event_ticker"):
+            raw = market.get(key)
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            needle = raw.strip().upper()
+            for prefix, m_taker, m_maker, source in _SERIES_FEE_CATALOG:
+                if needle.startswith(prefix) and (best is None or len(prefix) > best[0]):
+                    best = (len(prefix), m_taker, m_maker, source)
+    if best is None:
+        return Decimal(1), Decimal(0), "default"
+    return best[1], best[2], best[3]
+
+
+def fee_dome_cents(
+    price: Decimal,
+    contracts: Decimal = Decimal(1),
+    *,
+    multiplier: Decimal | None = None,
+) -> Decimal:
+    """Taker fee in cents: ceil(M_taker * 0.07 * C * P * (1-P) * 100). None means M_taker 1."""
+    return _schedule_fee_cents(
+        price,
+        contracts,
+        rate=_TAKER_RATE,
+        multiplier=Decimal(1) if multiplier is None else multiplier,
+    )
+
+
+def maker_fee_cents(
+    price: Decimal,
+    contracts: Decimal = Decimal(1),
+    *,
+    multiplier: Decimal | None = None,
+) -> Decimal:
+    """Maker fee in cents: ceil(M_maker * 0.0175 * C * P * (1-P) * 100). None or 0 is free."""
+    if multiplier is None:
+        return Decimal(0)
+    return _schedule_fee_cents(price, contracts, rate=_MAKER_RATE, multiplier=multiplier)
+
+
+def depth_haircut_cents(depth: Decimal | None) -> Decimal:
+    """Cents removed when the ask shows fewer than 3 contracts. Capped at 2. Zero at or above 3."""
+    if depth is None or depth >= Decimal(3):
+        return Decimal(0)
+    if depth <= 0:
+        return Decimal(2)
+    return min(Decimal(3) - depth, Decimal(2)).quantize(Decimal("0.01"))
 
 
 def flb_band(price: Decimal) -> str:
@@ -52,14 +190,64 @@ def stake_mode_for(price: Decimal) -> str:
     return "kelly"
 
 
-def edge_net_cents(confidence: Decimal, ask: Decimal, bid: Decimal | None) -> Decimal:
-    """Confidence minus the ask, minus the fee dome and half the spread, in cents."""
-    fee = fee_dome_cents(ask, Decimal(1))
+def side_exec_for(ask: Decimal, bid: Decimal | None) -> str:
+    """Maker when a one-cent rest can sit strictly below the ask."""
+    if bid is not None and ask > bid and (ask - bid) >= _CENT:
+        return "maker"
+    return "taker"
+
+
+def spread_cents_for(ask: Decimal, bid: Decimal | None) -> Decimal | None:
+    if bid is None or ask <= bid:
+        return None
+    return ((ask - bid) * Decimal(100)).quantize(Decimal("0.01"))
+
+
+def taker_longshot_allowed(*, allow_longshot: bool, net_cents: Decimal) -> bool:
+    """Taker quotes in the <10¢ band stay only for a named longshot with edge_net_cents >= 8."""
+    return allow_longshot and net_cents >= LONGSHOT_NET_CENTS
+
+
+def hold_to_res_default(*, days: Decimal, net_cents: Decimal, fee_cents: Decimal) -> bool:
+    """True when DTR is at most 7 and a round trip costs more than the remaining edge.
+
+    There is no settlement fee. A round trip is two trade fees. This is not a take-profit percent.
+    """
+    return days <= Decimal(7) and (fee_cents * 2) > net_cents
+
+
+def corr_group_hint(belief: dict, market: dict) -> str:
+    named = belief.get("corr_group")
+    if isinstance(named, str) and named:
+        return named
+    event = market.get("event_ticker")
+    if isinstance(event, str):
+        slug = re.sub(r"[^a-z0-9]+", "_", event.lower()).strip("_")
+        if _KEY_RE.fullmatch(slug):
+            return slug
+    tag = belief.get("category_tag")
+    if isinstance(tag, str):
+        slug = re.sub(r"[^a-z0-9]+", "_", tag.lower()).strip("_")
+        if _KEY_RE.fullmatch(slug):
+            return slug
+    return "unspecified_event"
+
+
+def edge_net_cents(
+    confidence: Decimal,
+    ask: Decimal,
+    bid: Decimal | None,
+    *,
+    depth: Decimal | None = None,
+    multiplier: Decimal | None = None,
+) -> Decimal:
+    """(confidence - ask) in cents, minus the taker fee dome, half the spread, and the depth haircut."""
+    fee = fee_dome_cents(ask, Decimal(1), multiplier=multiplier)
     spread = Decimal(0)
     if bid is not None and bid > 0 and ask > bid:
         spread = (ask - bid) * Decimal(100) / Decimal(2)
     gross = (confidence - ask) * Decimal(100)
-    return (gross - fee - spread).quantize(Decimal("0.01"))
+    return (gross - fee - spread - depth_haircut_cents(depth)).quantize(Decimal("0.01"))
 
 
 def score_formula(confidence: Decimal, payout_ratio: Decimal, stake: Decimal) -> Decimal:
@@ -70,12 +258,13 @@ def score_formula(confidence: Decimal, payout_ratio: Decimal, stake: Decimal) ->
 @dataclass(frozen=True)
 class Options:
     min_volume: Decimal = Decimal("20")
+    min_lifetime_volume: Decimal = Decimal("1000")
     min_ask_size: Decimal = Decimal("1")
     min_confidence: Decimal = Decimal("0.55")
     min_edge: Decimal = Decimal("0.08")
     min_hours: Decimal = Decimal("2")
     max_hours: Decimal = Decimal("1440")
-    max_price: Decimal = Decimal("0.50")
+    max_price: Decimal = Decimal("0.84")
     max_risk: Decimal = Decimal("5")
     limit: int = 5
     max_pages: int = 1
@@ -156,12 +345,15 @@ def parse_options(args: dict) -> Options:
         raise RuntimeError("max_hours_to_expiry must be greater than min_hours_to_expiry")
     return Options(
         min_volume=_decimal_arg(args, "min_volume", Decimal("20"), Decimal("0"), Decimal("1000000")),
+        min_lifetime_volume=_decimal_arg(
+            args, "min_lifetime_volume", Decimal("1000"), Decimal("0"), Decimal("100000000")
+        ),
         min_ask_size=_decimal_arg(args, "min_ask_size", Decimal("1"), Decimal("0"), Decimal("100000")),
         min_confidence=_decimal_arg(args, "min_confidence", Decimal("0.55"), Decimal("0.50"), Decimal("0.99")),
         min_edge=_decimal_arg(args, "min_edge", Decimal("0.08"), Decimal("0"), Decimal("0.90")),
         min_hours=min_hours,
         max_hours=max_hours,
-        max_price=_decimal_arg(args, "max_price", Decimal("0.50"), Decimal("0.05"), Decimal("0.84")),
+        max_price=_decimal_arg(args, "max_price", Decimal("0.84"), Decimal("0.05"), Decimal("0.84")),
         max_risk=_decimal_arg(args, "max_risk_dollars", Decimal("5"), Decimal("1"), Decimal("25")),
         limit=_int_arg(args, "limit", 5, 1, 10),
         max_pages=_int_arg(args, "max_pages", 1, 1, 4),
@@ -185,6 +377,26 @@ def _unit(value: object, field: str) -> Decimal:
         raise RuntimeError(f"{field} must be from 0 to 1") from None
     if number < 0 or number > 1:
         raise RuntimeError(f"{field} must be from 0 to 1")
+    return number
+
+
+def _wx_gap(value: object) -> Decimal:
+    """Optional weather gap in probability points. Logged only. Not an entry gate."""
+    if isinstance(value, bool):
+        raise RuntimeError("wx_gap_pp must be a number from -100 to 100")
+    try:
+        if isinstance(value, str):
+            number = Decimal(value.strip())
+        elif isinstance(value, int):
+            number = Decimal(value)
+        elif isinstance(value, float):
+            number = Decimal(format(value, ".6f"))
+        else:
+            raise InvalidOperation
+    except (InvalidOperation, ValueError):
+        raise RuntimeError("wx_gap_pp must be a number from -100 to 100") from None
+    if number < Decimal("-100") or number > Decimal("100"):
+        raise RuntimeError("wx_gap_pp must be a number from -100 to 100")
     return number
 
 
@@ -260,7 +472,8 @@ def parse_beliefs(raw: object) -> list[dict]:
             belief["category_tag"] = tag
         if "corr_group" in item and item.get("corr_group") not in (None, ""):
             group = item.get("corr_group")
-            if not isinstance(group, str) or _KEY_RE.fullmatch(group) is None:
+            absent = isinstance(group, str) and group.strip().lower() in _CORR_ABSENT
+            if not isinstance(group, str) or absent or _KEY_RE.fullmatch(group) is None:
                 raise RuntimeError("corr_group must be a snake_case risk driver")
             belief["corr_group"] = group
         if "model_sources" in item and item.get("model_sources") not in (None, ""):
@@ -268,6 +481,13 @@ def parse_beliefs(raw: object) -> list[dict]:
             if not isinstance(sources, str) or not (8 <= len(sources.strip()) <= 200):
                 raise RuntimeError("model_sources must name the model")
             belief["model_sources"] = sources.strip()
+        if "allow_longshot" in item and item.get("allow_longshot") is not None:
+            flag = item.get("allow_longshot")
+            if not isinstance(flag, bool):
+                raise RuntimeError("allow_longshot must be a boolean")
+            belief["allow_longshot"] = flag
+        if "wx_gap_pp" in item and item.get("wx_gap_pp") not in (None, ""):
+            belief["wx_gap_pp"] = _wx_gap(item.get("wx_gap_pp"))
         if "settlement_match_score" in item and item.get("settlement_match_score") not in (None, ""):
             belief["settlement_match_score"] = _unit(item.get("settlement_match_score"), "settlement_match_score")
         found.append(belief)
@@ -356,12 +576,32 @@ def _empty_counts(scanned: int) -> dict[str, int]:
         "skipped_price": 0,
         "skipped_confidence": 0,
         "skipped_edge": 0,
+        "skipped_edge_net": 0,
         "skipped_risk": 0,
         "skipped_flb": 0,
         "skipped_fee_blind": 0,
         "skipped_settlement": 0,
         "skipped_yes_replicate": 0,
     }
+
+
+def _volumes(market: dict) -> tuple[Decimal | None, Decimal | None]:
+    """24h volume is the weaker proxy. volume / volume_fp is lifetime."""
+    volume_24h = _first_decimal(market, ("volume_24h_fp", "volume_24h"))
+    lifetime = _first_decimal(market, ("volume_fp", "volume"))
+    return volume_24h, lifetime
+
+
+def _volume_ok(volume_24h: Decimal | None, lifetime: Decimal | None, options: Options) -> bool:
+    if lifetime is not None and lifetime >= options.min_lifetime_volume:
+        return True
+    return volume_24h is not None and volume_24h >= options.min_volume
+
+
+def _volume_floor(volume_24h: Decimal | None, lifetime: Decimal | None, options: Options) -> str:
+    if lifetime is not None and lifetime >= options.min_lifetime_volume:
+        return "lifetime"
+    return "24h"
 
 
 def _screen(market: dict, side: str, options: Options, now: datetime) -> tuple[dict | None, str | None]:
@@ -374,8 +614,8 @@ def _screen(market: dict, side: str, options: Options, now: datetime) -> tuple[d
     hours, close_time = expiry
     if hours < float(options.min_hours) or hours > float(options.max_hours):
         return None, "skipped_expiry"
-    volume = _first_decimal(market, ("volume_24h_fp", "volume_fp", "volume_24h", "volume"))
-    if volume is None or volume < options.min_volume:
+    volume_24h, lifetime = _volumes(market)
+    if not _volume_ok(volume_24h, lifetime, options):
         return None, "skipped_liquidity"
     stake, ask_size = _side_quote(market, side)
     bid = _price(market, "yes_bid_dollars", "yes_bid") if side == "yes" else _price(market, "no_bid_dollars", "no_bid")
@@ -390,7 +630,9 @@ def _screen(market: dict, side: str, options: Options, now: datetime) -> tuple[d
     return {
         "hours": hours,
         "close_time": close_time,
-        "volume": volume,
+        "volume_24h": volume_24h,
+        "volume_lifetime": lifetime,
+        "volume_floor": _volume_floor(volume_24h, lifetime, options),
         "stake": stake,
         "bid": bid,
         "ask_size": ask_size,
@@ -416,10 +658,37 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
     match = belief.get("settlement_match_score")
     if match is not None and match < 1:
         return None, "skipped_settlement"
-    net_cents = edge_net_cents(confidence, screened["stake"], screened.get("bid"))
-    if screened["stake"] <= Decimal("0.10") and net_cents < Decimal(8):
-        return None, "skipped_flb"
-    affordable = int((options.max_risk / screened["stake"]).to_integral_value(rounding=ROUND_DOWN))
+    payload_m = series_multiplier(market)
+    m_taker, m_maker, fee_source = series_fees(market)
+    exec_side = side_exec_for(screened["stake"], screened.get("bid"))
+    fee_one = fee_dome_cents(screened["stake"], Decimal(1), multiplier=m_taker)
+    fee_est = (
+        maker_fee_cents(screened["stake"], Decimal(1), multiplier=m_maker)
+        if exec_side == "maker"
+        else fee_one
+    )
+    net_cents = edge_net_cents(
+        confidence,
+        screened["stake"],
+        screened.get("bid"),
+        depth=screened.get("ask_size"),
+        multiplier=m_taker,
+    )
+    if net_cents <= 0:
+        return None, "skipped_edge_net"
+    band = flb_band(screened["stake"])
+    dollar_cap = options.max_risk
+    if band in {"<10¢", "10–25¢"}:
+        dollar_cap = min(dollar_cap, Decimal("2"))
+    if band == "<10¢":
+        if exec_side == "taker" and not taker_longshot_allowed(
+            allow_longshot=belief.get("allow_longshot") is True,
+            net_cents=net_cents,
+        ):
+            return None, "skipped_flb"
+        if exec_side != "taker" and net_cents < LONGSHOT_NET_CENTS:
+            return None, "skipped_flb"
+    affordable = int((dollar_cap / screened["stake"]).to_integral_value(rounding=ROUND_DOWN))
     size_cap = int(screened["ask_size"].to_integral_value(rounding=ROUND_DOWN))
     contracts = min(affordable, size_cap)
     if contracts < 1:
@@ -427,6 +696,13 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
     risk = screened["stake"] * Decimal(contracts)
     payout_ratio = screened["profit"] / screened["stake"]
     score = score_formula(confidence, payout_ratio, screened["stake"])
+    days = (Decimal(str(screened["hours"])) / _DAY).quantize(Decimal("0.01"))
+    spread = spread_cents_for(screened["stake"], screened.get("bid"))
+    hold = hold_to_res_default(days=days, net_cents=net_cents, fee_cents=fee_one)
+    maker_near = exec_side == "maker" and fee_one <= MAKER_NEAR_CENTS
+    hint = corr_group_hint(belief, market)
+    volume_24h = screened.get("volume_24h")
+    lifetime = screened.get("volume_lifetime")
     stake_text = _q4(screened["stake"])
     ratio_text = _q4(payout_ratio)
     conf_text = _q4(confidence)
@@ -451,7 +727,7 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
         parts.append(text)
     closing = DO_NOT_PLACE[:1].upper() + DO_NOT_PLACE[1:]
     parts.append(f"{closing}.")
-    return {
+    row = {
         "ticker": ticker,
         "event_ticker": market.get("event_ticker") if isinstance(market.get("event_ticker"), str) else None,
         "title": title,
@@ -465,8 +741,25 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
         "score": format(score, "f"),
         "suggested_contracts": contracts,
         "suggested_max_dollars_risked": risk_text,
-        "volume_24h": _q4(screened["volume"]),
+        "volume_24h": _q4(volume_24h) if isinstance(volume_24h, Decimal) else None,
+        "volume_lifetime": _q4(lifetime) if isinstance(lifetime, Decimal) else None,
+        "volume_floor": screened.get("volume_floor"),
         "ask_size": _q4(screened["ask_size"]),
+        "side_exec": exec_side,
+        "SIDE_EXEC": exec_side,
+        "maker_flag": exec_side == "maker",
+        "days_to_res": format(days, "f"),
+        "DAYS_TO_RES": format(days, "f"),
+        "spread_cents": format(spread, "f") if spread is not None else None,
+        "depth_at_ask": _q4(screened["ask_size"]),
+        "fee_cents_est": format(fee_est, "f"),
+        "m_taker": _plain(m_taker),
+        "m_maker": _plain(m_maker),
+        "fee_m_source": fee_source,
+        "series_fee_multiplier": _plain(payload_m) if payload_m is not None else None,
+        "corr_group_hint": hint,
+        "hold_to_res_default": hold,
+        "HOLD_TO_RES_DEFAULT": hold,
         "hours_to_expiry": f"{screened['hours']:.2f}",
         "close_time": screened["close_time"],
         "evidence": evidence,
@@ -476,8 +769,12 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
         "model_sources": belief.get("model_sources"),
         "edge_net_cents": format(net_cents, "f"),
         "flb_band": flb_band(screened["stake"]),
-        "fee_entry_cents": format(fee_dome_cents(screened["stake"], Decimal(1)), "f"),
-        "fee_dome": "ceil(0.07 * contracts * price * (1 - price)) cents",
+        "fee_entry_cents": format(fee_one, "f"),
+        "fee_dome": (
+            "ceil(M_taker * 0.07 * contracts * price * (1 - price)) cents; "
+            "maker is ceil(M_maker * 0.0175 * contracts * price * (1 - price)). "
+            "Series lookup before the score. No settlement fee."
+        ),
         "kelly_frac": "0.25",
         "stake_mode": stake_mode_for(screened["stake"]),
         "yes_no_replicate": "clear",
@@ -485,7 +782,12 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
         "do_not_place": DO_NOT_PLACE,
         "_score": score,
         "_edge": edge,
-    }, None
+        "_maker_near": maker_near,
+    }
+    gap = belief.get("wx_gap_pp")
+    if isinstance(gap, Decimal):
+        row["wx_gap_pp"] = _plain(gap)
+    return row, None
 
 
 def _drop_dominated_yes(ranked: list[dict], by_ticker: dict[str, dict], counts: dict[str, int]) -> list[dict]:
@@ -501,7 +803,8 @@ def _drop_dominated_yes(ranked: list[dict], by_ticker: dict[str, dict], counts: 
         if bid is None or ask is None:
             continue
         mid = (bid + ask) / Decimal(2)
-        fee = fee_dome_cents(mid, Decimal(1)) / Decimal(100)
+        m_taker, _m_maker, _source = series_fees(market)
+        fee = fee_dome_cents(mid, Decimal(1), multiplier=m_taker) / Decimal(100)
         legs.setdefault(event, []).append((ticker, mid, fee))
     dominated: set[str] = set()
     cheaper: set[str] = set()
@@ -558,7 +861,16 @@ def rank_markets(
             continue
         ranked.append(row)
     ranked = _drop_dominated_yes(ranked, by_ticker, counts)
-    ranked.sort(key=lambda item: (-item["_score"], -item["_edge"], item["ticker"], item["side"]))
+    # Maker quotes whose taker fee is within 2 cents sort one score quantum ahead.
+    # The displayed score stays estimated_confidence * payout_ratio / stake_needed.
+    ranked.sort(
+        key=lambda item: (
+            -(item["_score"] + (Decimal("0.0001") if item.get("_maker_near") else Decimal(0))),
+            -item["_edge"],
+            item["ticker"],
+            item["side"],
+        )
+    )
     shown = ranked[: options.limit]
     counts["truncated"] = len(ranked) - len(shown)
     counts["ranked"] = len(shown)
@@ -566,9 +878,11 @@ def rank_markets(
         row["rank"] = index
         row.pop("_score", None)
         row.pop("_edge", None)
+        row.pop("_maker_near", None)
     for row in ranked[options.limit :]:
         row.pop("_score", None)
         row.pop("_edge", None)
+        row.pop("_maker_near", None)
     return shown, counts, missing
 
 
@@ -591,8 +905,8 @@ def research_queue(markets: list[dict], options: Options, now: datetime) -> tupl
         if expiry is None or expiry[0] < float(options.min_hours) or expiry[0] > float(options.max_hours):
             counts["skipped_expiry"] += 1
             continue
-        volume = _first_decimal(market, ("volume_24h_fp", "volume_fp", "volume_24h", "volume"))
-        if volume is None or volume < options.min_volume:
+        volume_24h, lifetime = _volumes(market)
+        if not _volume_ok(volume_24h, lifetime, options):
             counts["skipped_liquidity"] += 1
             continue
         offers: list[tuple[str, Decimal]] = []
@@ -618,7 +932,9 @@ def research_queue(markets: list[dict], options: Options, now: datetime) -> tupl
             "title": _title(market, "yes"),
             "yes_ask": _q4(yes_ask) if yes_ask is not None else None,
             "no_ask": _q4(no_ask) if no_ask is not None else None,
-            "volume_24h": _q4(volume),
+            "volume_24h": _q4(volume_24h) if volume_24h is not None else None,
+            "volume_lifetime": _q4(lifetime) if lifetime is not None else None,
+            "volume_floor": _volume_floor(volume_24h, lifetime, options),
             "hours_to_expiry": f"{hours:.2f}",
             "close_time": close_time,
             "note": RESEARCH_NOTE,
@@ -635,6 +951,7 @@ def filters_payload(options: Options) -> dict[str, str | int]:
     return {
         "formula": FORMULA,
         "min_volume": _plain(options.min_volume),
+        "min_lifetime_volume": _plain(options.min_lifetime_volume),
         "min_ask_size": _plain(options.min_ask_size),
         "min_confidence": _plain(options.min_confidence),
         "min_edge": _plain(options.min_edge),
