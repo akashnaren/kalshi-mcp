@@ -13,12 +13,13 @@ Fleet default is read-only: `KALSHI_SAFE_MODE=1`, so `tools/list` omits `place_o
 
 ## What to trade
 
-`find_best_bets` scores `estimated_confidence * payout_ratio / stake_needed`. Cheap contracts with a real edge sort first. Each row also has `edge_net_cents` after the fee dome, `flb_band`, `kelly_frac` (0.25), and `stake_mode`.
+`find_best_bets` scores `estimated_confidence * payout_ratio / stake_needed`. Cheap contracts with a real edge sort first. Each row also has `edge_net_cents` after the fee dome, `flb_band`, `kelly_frac` (0.25), `stake_mode`, `side_exec`, `days_to_res`, `spread_cents`, `depth_at_ask`, `fee_cents_est`, `corr_group_hint`, and `hold_to_res_default`. The same execution, horizon, and hold fields are also emitted as `SIDE_EXEC`, `DAYS_TO_RES`, and `HOLD_TO_RES_DEFAULT`.
 
-- Pass beliefs with `ticker`, `side` (`yes` or `no`), `confidence`, and `evidence`. Optional named fields: `key`, `category_tag`, `corr_group`, `model_sources`.
-- A price at or under 10 cents is skipped unless `edge_net_cents` is at least 8. That stake stays a fixed $2.
-- Prices at or above 0.85 are never recommended. The default `max_price` is 0.50.
-- Fee-blind evidence is skipped.
+- Pass beliefs with `ticker`, `side` (`yes` or `no`), `confidence`, and `evidence`. Optional named fields: `key`, `category_tag`, `corr_group`, `model_sources`, `allow_longshot`.
+- A taker quote in the `<10¢` band is dropped unless `allow_longshot` is true, the probability edge is at least 0.08, and the suggested stake is forced to $2. `min_edge` is those probability points, not cents, and is separate from `edge_net_cents`.
+- Prices at or above 0.85 are never recommended. The default `max_price` is 0.84 (the hard ceiling) so a contract from 50¢ to 84¢ with edge is eligible. Pass a lower `max_price` to narrow the band. The old 0.50 default hid that band.
+- Lifetime volume of at least 1000 passes the floor. 24h `min_volume` (default 20) is the weaker proxy. Rows expose `volume_lifetime` and `volume_24h`.
+- Fee-blind evidence is skipped. A maker row whose taker fee is within 2 cents gets a tiny sort bump. The displayed score stays the formula.
 
 ## Caps
 
@@ -27,7 +28,7 @@ The order tools enforce these. Do not route around them.
 - About a **$2** default until Kalshi fill history shows the sleeve has been profitable.
 - **Hard max $15** per trade. A setting above $15 is ignored.
 - **15%** of the sleeve in one market. Never all-in.
-- **30%** of the sleeve in one `corr_group`. Pass `corr_group` on `place_order`.
+- **30%** of the sleeve in one `corr_group`. `place_order` and `amend_order` refuse opening risk when `corr_group` is missing.
 - **$10** of new notional per UTC day.
 - Prices under 25 cents stay at $2 even after a winning history. At or above 50 cents, modest size can reach $8 once the sleeve is profitable, still inside the $15 ceiling.
 

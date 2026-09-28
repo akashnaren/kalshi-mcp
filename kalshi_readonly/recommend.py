@@ -27,8 +27,16 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_KEEP_NULL = frozenset({
+    "spread_cents",
+    "volume_24h",
+    "volume_lifetime",
+    "corr_group",
+})
+
+
 def _drop_empty(row: dict) -> dict:
-    return {key: value for key, value in row.items() if value is not None}
+    return {key: value for key, value in row.items() if value is not None or key in _KEEP_NULL}
 
 
 def _envelope(
@@ -164,13 +172,19 @@ FIND_BEST_TOOL = {
     "description": (
         "Read-only ranking of open Kalshi markets. "
         "Score is estimated_confidence times payout_ratio divided by stake_needed. "
-        "Each row also reports edge_net_cents after the Kalshi fee dome, flb_band, kelly_frac 0.25, and stake_mode. "
-        "Prefers a small stake and a high payout when confidence in that yes or no side is high. "
+        "Each row reports edge_net_cents, flb_band, kelly_frac 0.25, stake_mode, "
+        "side_exec (SIDE_EXEC), days_to_res (DAYS_TO_RES), spread_cents, depth_at_ask, "
+        "fee_cents_est, corr_group_hint, and hold_to_res_default (HOLD_TO_RES_DEFAULT). "
+        "min_edge is probability points, default 0.08, and is separate from edge_net_cents. "
+        "max_price defaults to 0.84, the hard ceiling, so a 50 to 84 cent contract with edge stays eligible. "
+        "Pass a lower max_price to narrow the band. "
+        "Lifetime volume of at least 1000 passes the floor. 24h min_volume is the weaker proxy. Both are on the row. "
+        "A taker quote under 10 cents is dropped unless allow_longshot is true, edge is at least 0.08, and stake is $2. "
         "Pass beliefs with ticker, side (yes or no), confidence, and optional evidence. "
         "Without beliefs, returns a short research queue and no recommendations. "
         "A later scan page that is rate limited sets rate_limited true and keeps pages already fetched. "
         "Does not place, cancel, amend, or decrease. "
-        "do not place until Akash names the trade."
+        "The Finance Engineer may place a surviving row under the caps with confirm true."
     ),
     "inputSchema": {
         "type": "object",
@@ -185,19 +199,37 @@ FIND_BEST_TOOL = {
                         "side": {"type": "string", "enum": ["yes", "no"]},
                         "confidence": {"type": "number"},
                         "evidence": {"type": "string"},
+                        "allow_longshot": {
+                            "type": "boolean",
+                            "description": "Keep a taker quote in the <10¢ band. Requires edge at least 0.08 and forces a $2 stake.",
+                        },
+                        "corr_group": {"type": "string"},
                     },
                     "required": ["ticker", "side", "confidence"],
                 },
             },
             "max_pages": {"type": "integer", "description": "Scan pages when beliefs are omitted. 1 to 4. Default 1."},
             "page_size": {"type": "integer", "description": "Markets per scan page. 1 to 200. Default 100."},
-            "min_volume": {"type": "number", "description": "Minimum 24h volume in contracts. Default 20."},
+            "min_volume": {
+                "type": "number",
+                "description": "Weaker 24h volume proxy in contracts. Default 20. Lifetime volume is separate.",
+            },
+            "min_lifetime_volume": {
+                "type": "number",
+                "description": "Lifetime contract volume floor. Default 1000. A market passes if lifetime or the 24h proxy clears.",
+            },
             "min_ask_size": {"type": "number", "description": "Minimum displayed size at the ask. Default 1."},
             "min_confidence": {"type": "number", "description": "Floor is 0.50. Default 0.55."},
-            "min_edge": {"type": "number", "description": "Confidence minus the ask. Default 0.08."},
+            "min_edge": {
+                "type": "number",
+                "description": "Probability points (confidence minus the ask), not cents. Default 0.08. Separate from edge_net_cents. Do not add them twice.",
+            },
             "min_hours_to_expiry": {"type": "number", "description": "Default 2."},
             "max_hours_to_expiry": {"type": "number", "description": "Default 1440 (60 days)."},
-            "max_price": {"type": "number", "description": "Most you will pay per contract. Default 0.50. Hard ceiling 0.84."},
+            "max_price": {
+                "type": "number",
+                "description": "Most you will pay per contract. Default 0.84 (the hard ceiling) so mid and high prices with edge are eligible. Pass a lower value to narrow the band. Prices at or above 0.85 are never recommended.",
+            },
             "max_risk_dollars": {"type": "number", "description": "Cap on suggested dollars at risk. 1 to 25. Default 5."},
             "limit": {"type": "integer", "description": "How many rows to return. 1 to 10. Default 5."},
         },

@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN
 
-DO_NOT_PLACE = "do not place until Akash names the trade"
+DO_NOT_PLACE = "Finance Engineer may place under the caps with confirm true"
+LONGSHOT_EDGE = Decimal("0.08")
+MAKER_NEAR_CENTS = Decimal("2")
+_DAY = Decimal(24)
 FORMULA = "estimated_confidence * payout_ratio / stake_needed"
 RESEARCH_NOTE = "no confidence supplied; not a recommendation"
 
@@ -52,6 +55,46 @@ def stake_mode_for(price: Decimal) -> str:
     return "kelly"
 
 
+def side_exec_for(ask: Decimal, bid: Decimal | None) -> str:
+    """Maker when a one-cent rest can sit strictly below the ask."""
+    if bid is not None and ask > bid and (ask - bid) >= _CENT:
+        return "maker"
+    return "taker"
+
+
+def spread_cents_for(ask: Decimal, bid: Decimal | None) -> Decimal | None:
+    if bid is None or ask <= bid:
+        return None
+    return ((ask - bid) * Decimal(100)).quantize(Decimal("0.01"))
+
+
+def taker_longshot_allowed(*, allow_longshot: bool, edge: Decimal) -> bool:
+    """Taker quotes in the <10¢ band stay only for a named longshot with edge ≥ 0.08."""
+    return allow_longshot and edge >= LONGSHOT_EDGE
+
+
+def hold_to_res_default(*, days: Decimal, net_cents: Decimal, fee_cents: Decimal) -> bool:
+    """True when resolution is within 7 days and a round trip costs more than the remaining edge."""
+    return days <= Decimal(7) and (fee_cents * 2) > net_cents
+
+
+def corr_group_hint(belief: dict, market: dict) -> str:
+    named = belief.get("corr_group")
+    if isinstance(named, str) and named:
+        return named
+    event = market.get("event_ticker")
+    if isinstance(event, str):
+        slug = re.sub(r"[^a-z0-9]+", "_", event.lower()).strip("_")
+        if _KEY_RE.fullmatch(slug):
+            return slug
+    tag = belief.get("category_tag")
+    if isinstance(tag, str):
+        slug = re.sub(r"[^a-z0-9]+", "_", tag.lower()).strip("_")
+        if _KEY_RE.fullmatch(slug):
+            return slug
+    return "unspecified_event"
+
+
 def edge_net_cents(confidence: Decimal, ask: Decimal, bid: Decimal | None) -> Decimal:
     """Confidence minus the ask, minus the fee dome and half the spread, in cents."""
     fee = fee_dome_cents(ask, Decimal(1))
@@ -70,12 +113,13 @@ def score_formula(confidence: Decimal, payout_ratio: Decimal, stake: Decimal) ->
 @dataclass(frozen=True)
 class Options:
     min_volume: Decimal = Decimal("20")
+    min_lifetime_volume: Decimal = Decimal("1000")
     min_ask_size: Decimal = Decimal("1")
     min_confidence: Decimal = Decimal("0.55")
     min_edge: Decimal = Decimal("0.08")
     min_hours: Decimal = Decimal("2")
     max_hours: Decimal = Decimal("1440")
-    max_price: Decimal = Decimal("0.50")
+    max_price: Decimal = Decimal("0.84")
     max_risk: Decimal = Decimal("5")
     limit: int = 5
     max_pages: int = 1
@@ -156,12 +200,15 @@ def parse_options(args: dict) -> Options:
         raise RuntimeError("max_hours_to_expiry must be greater than min_hours_to_expiry")
     return Options(
         min_volume=_decimal_arg(args, "min_volume", Decimal("20"), Decimal("0"), Decimal("1000000")),
+        min_lifetime_volume=_decimal_arg(
+            args, "min_lifetime_volume", Decimal("1000"), Decimal("0"), Decimal("100000000")
+        ),
         min_ask_size=_decimal_arg(args, "min_ask_size", Decimal("1"), Decimal("0"), Decimal("100000")),
         min_confidence=_decimal_arg(args, "min_confidence", Decimal("0.55"), Decimal("0.50"), Decimal("0.99")),
         min_edge=_decimal_arg(args, "min_edge", Decimal("0.08"), Decimal("0"), Decimal("0.90")),
         min_hours=min_hours,
         max_hours=max_hours,
-        max_price=_decimal_arg(args, "max_price", Decimal("0.50"), Decimal("0.05"), Decimal("0.84")),
+        max_price=_decimal_arg(args, "max_price", Decimal("0.84"), Decimal("0.05"), Decimal("0.84")),
         max_risk=_decimal_arg(args, "max_risk_dollars", Decimal("5"), Decimal("1"), Decimal("25")),
         limit=_int_arg(args, "limit", 5, 1, 10),
         max_pages=_int_arg(args, "max_pages", 1, 1, 4),
@@ -268,6 +315,11 @@ def parse_beliefs(raw: object) -> list[dict]:
             if not isinstance(sources, str) or not (8 <= len(sources.strip()) <= 200):
                 raise RuntimeError("model_sources must name the model")
             belief["model_sources"] = sources.strip()
+        if "allow_longshot" in item and item.get("allow_longshot") is not None:
+            flag = item.get("allow_longshot")
+            if not isinstance(flag, bool):
+                raise RuntimeError("allow_longshot must be a boolean")
+            belief["allow_longshot"] = flag
         if "settlement_match_score" in item and item.get("settlement_match_score") not in (None, ""):
             belief["settlement_match_score"] = _unit(item.get("settlement_match_score"), "settlement_match_score")
         found.append(belief)
@@ -364,6 +416,25 @@ def _empty_counts(scanned: int) -> dict[str, int]:
     }
 
 
+def _volumes(market: dict) -> tuple[Decimal | None, Decimal | None]:
+    """24h volume is the weaker proxy. volume / volume_fp is lifetime."""
+    volume_24h = _first_decimal(market, ("volume_24h_fp", "volume_24h"))
+    lifetime = _first_decimal(market, ("volume_fp", "volume"))
+    return volume_24h, lifetime
+
+
+def _volume_ok(volume_24h: Decimal | None, lifetime: Decimal | None, options: Options) -> bool:
+    if lifetime is not None and lifetime >= options.min_lifetime_volume:
+        return True
+    return volume_24h is not None and volume_24h >= options.min_volume
+
+
+def _volume_floor(volume_24h: Decimal | None, lifetime: Decimal | None, options: Options) -> str:
+    if lifetime is not None and lifetime >= options.min_lifetime_volume:
+        return "lifetime"
+    return "24h"
+
+
 def _screen(market: dict, side: str, options: Options, now: datetime) -> tuple[dict | None, str | None]:
     """Shared liquidity, time, and price checks. Confidence is applied by the caller."""
     if not _tradable(market):
@@ -374,8 +445,8 @@ def _screen(market: dict, side: str, options: Options, now: datetime) -> tuple[d
     hours, close_time = expiry
     if hours < float(options.min_hours) or hours > float(options.max_hours):
         return None, "skipped_expiry"
-    volume = _first_decimal(market, ("volume_24h_fp", "volume_fp", "volume_24h", "volume"))
-    if volume is None or volume < options.min_volume:
+    volume_24h, lifetime = _volumes(market)
+    if not _volume_ok(volume_24h, lifetime, options):
         return None, "skipped_liquidity"
     stake, ask_size = _side_quote(market, side)
     bid = _price(market, "yes_bid_dollars", "yes_bid") if side == "yes" else _price(market, "no_bid_dollars", "no_bid")
@@ -390,7 +461,9 @@ def _screen(market: dict, side: str, options: Options, now: datetime) -> tuple[d
     return {
         "hours": hours,
         "close_time": close_time,
-        "volume": volume,
+        "volume_24h": volume_24h,
+        "volume_lifetime": lifetime,
+        "volume_floor": _volume_floor(volume_24h, lifetime, options),
         "stake": stake,
         "bid": bid,
         "ask_size": ask_size,
@@ -417,9 +490,20 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
     if match is not None and match < 1:
         return None, "skipped_settlement"
     net_cents = edge_net_cents(confidence, screened["stake"], screened.get("bid"))
-    if screened["stake"] <= Decimal("0.10") and net_cents < Decimal(8):
-        return None, "skipped_flb"
-    affordable = int((options.max_risk / screened["stake"]).to_integral_value(rounding=ROUND_DOWN))
+    exec_side = side_exec_for(screened["stake"], screened.get("bid"))
+    band = flb_band(screened["stake"])
+    fee_one = fee_dome_cents(screened["stake"], Decimal(1))
+    dollar_cap = options.max_risk
+    if band == "<10¢":
+        dollar_cap = min(dollar_cap, Decimal("2"))
+        if exec_side == "taker" and not taker_longshot_allowed(
+            allow_longshot=belief.get("allow_longshot") is True,
+            edge=edge,
+        ):
+            return None, "skipped_flb"
+        if exec_side != "taker" and net_cents < Decimal(8):
+            return None, "skipped_flb"
+    affordable = int((dollar_cap / screened["stake"]).to_integral_value(rounding=ROUND_DOWN))
     size_cap = int(screened["ask_size"].to_integral_value(rounding=ROUND_DOWN))
     contracts = min(affordable, size_cap)
     if contracts < 1:
@@ -427,6 +511,14 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
     risk = screened["stake"] * Decimal(contracts)
     payout_ratio = screened["profit"] / screened["stake"]
     score = score_formula(confidence, payout_ratio, screened["stake"])
+    days = (Decimal(str(screened["hours"])) / _DAY).quantize(Decimal("0.01"))
+    spread = spread_cents_for(screened["stake"], screened.get("bid"))
+    hold = hold_to_res_default(days=days, net_cents=net_cents, fee_cents=fee_one)
+    maker_near = exec_side == "maker" and fee_one <= MAKER_NEAR_CENTS
+    fee_est = Decimal(0) if exec_side == "maker" else fee_one
+    hint = corr_group_hint(belief, market)
+    volume_24h = screened.get("volume_24h")
+    lifetime = screened.get("volume_lifetime")
     stake_text = _q4(screened["stake"])
     ratio_text = _q4(payout_ratio)
     conf_text = _q4(confidence)
@@ -465,8 +557,20 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
         "score": format(score, "f"),
         "suggested_contracts": contracts,
         "suggested_max_dollars_risked": risk_text,
-        "volume_24h": _q4(screened["volume"]),
+        "volume_24h": _q4(volume_24h) if isinstance(volume_24h, Decimal) else None,
+        "volume_lifetime": _q4(lifetime) if isinstance(lifetime, Decimal) else None,
+        "volume_floor": screened.get("volume_floor"),
         "ask_size": _q4(screened["ask_size"]),
+        "side_exec": exec_side,
+        "SIDE_EXEC": exec_side,
+        "days_to_res": format(days, "f"),
+        "DAYS_TO_RES": format(days, "f"),
+        "spread_cents": format(spread, "f") if spread is not None else None,
+        "depth_at_ask": _q4(screened["ask_size"]),
+        "fee_cents_est": format(fee_est, "f"),
+        "corr_group_hint": hint,
+        "hold_to_res_default": hold,
+        "HOLD_TO_RES_DEFAULT": hold,
         "hours_to_expiry": f"{screened['hours']:.2f}",
         "close_time": screened["close_time"],
         "evidence": evidence,
@@ -485,6 +589,7 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
         "do_not_place": DO_NOT_PLACE,
         "_score": score,
         "_edge": edge,
+        "_maker_near": maker_near,
     }, None
 
 
@@ -558,7 +663,16 @@ def rank_markets(
             continue
         ranked.append(row)
     ranked = _drop_dominated_yes(ranked, by_ticker, counts)
-    ranked.sort(key=lambda item: (-item["_score"], -item["_edge"], item["ticker"], item["side"]))
+    # Maker quotes whose taker fee is within 2 cents sort one score quantum ahead.
+    # The displayed score stays estimated_confidence * payout_ratio / stake_needed.
+    ranked.sort(
+        key=lambda item: (
+            -(item["_score"] + (Decimal("0.0001") if item.get("_maker_near") else Decimal(0))),
+            -item["_edge"],
+            item["ticker"],
+            item["side"],
+        )
+    )
     shown = ranked[: options.limit]
     counts["truncated"] = len(ranked) - len(shown)
     counts["ranked"] = len(shown)
@@ -566,9 +680,11 @@ def rank_markets(
         row["rank"] = index
         row.pop("_score", None)
         row.pop("_edge", None)
+        row.pop("_maker_near", None)
     for row in ranked[options.limit :]:
         row.pop("_score", None)
         row.pop("_edge", None)
+        row.pop("_maker_near", None)
     return shown, counts, missing
 
 
@@ -591,8 +707,8 @@ def research_queue(markets: list[dict], options: Options, now: datetime) -> tupl
         if expiry is None or expiry[0] < float(options.min_hours) or expiry[0] > float(options.max_hours):
             counts["skipped_expiry"] += 1
             continue
-        volume = _first_decimal(market, ("volume_24h_fp", "volume_fp", "volume_24h", "volume"))
-        if volume is None or volume < options.min_volume:
+        volume_24h, lifetime = _volumes(market)
+        if not _volume_ok(volume_24h, lifetime, options):
             counts["skipped_liquidity"] += 1
             continue
         offers: list[tuple[str, Decimal]] = []
@@ -618,7 +734,9 @@ def research_queue(markets: list[dict], options: Options, now: datetime) -> tupl
             "title": _title(market, "yes"),
             "yes_ask": _q4(yes_ask) if yes_ask is not None else None,
             "no_ask": _q4(no_ask) if no_ask is not None else None,
-            "volume_24h": _q4(volume),
+            "volume_24h": _q4(volume_24h) if volume_24h is not None else None,
+            "volume_lifetime": _q4(lifetime) if lifetime is not None else None,
+            "volume_floor": _volume_floor(volume_24h, lifetime, options),
             "hours_to_expiry": f"{hours:.2f}",
             "close_time": close_time,
             "note": RESEARCH_NOTE,
@@ -635,6 +753,7 @@ def filters_payload(options: Options) -> dict[str, str | int]:
     return {
         "formula": FORMULA,
         "min_volume": _plain(options.min_volume),
+        "min_lifetime_volume": _plain(options.min_lifetime_volume),
         "min_ask_size": _plain(options.min_ask_size),
         "min_confidence": _plain(options.min_confidence),
         "min_edge": _plain(options.min_edge),

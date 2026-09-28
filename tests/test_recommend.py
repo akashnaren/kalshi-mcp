@@ -125,9 +125,14 @@ def test_find_best_bets_ranks_cheap_high_confidence_over_near_certain(monkeypatc
     assert Decimal(cheap["score"]) > Decimal(out["recommendations"][1]["score"])
 
     narrow = find_best_bets({"beliefs": _beliefs()}, now=NOW)
-    assert [row["ticker"] for row in narrow["recommendations"]] == ["CHEAP-HIGH"]
+    assert narrow["filters"]["max_price"] == "0.84"
+    assert [row["ticker"] for row in narrow["recommendations"]] == ["CHEAP-HIGH", "HEAVY-NEAR"]
     assert narrow["cache"] == "hit"
     assert narrow["requests"] == 0
+    capped = find_best_bets({"beliefs": _beliefs(), "max_price": "0.50"}, now=NOW)
+    assert capped["filters"]["max_price"] == "0.5"
+    assert [row["ticker"] for row in capped["recommendations"]] == ["CHEAP-HIGH"]
+    assert capped["cache"] == "hit"
     assert len(calls) == 1
 
 
