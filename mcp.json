@@ -5,6 +5,7 @@
       "args": ["${PLUGIN_ROOT}/server.py"],
       "env": {
         "KALSHI_API_KEY_ID": "${KALSHI_API_KEY_ID}",
+        "KALSHI_API_KEY_ID_PATH": "${KALSHI_API_KEY_ID_PATH}",
         "KALSHI_PRIVATE_KEY_PATH": "${KALSHI_PRIVATE_KEY_PATH}",
         "KALSHI_PRIVATE_KEY_PEM": "${KALSHI_PRIVATE_KEY_PEM}",
         "KALSHI_SAFE_MODE": "${KALSHI_SAFE_MODE}"
