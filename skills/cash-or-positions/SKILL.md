@@ -12,7 +12,7 @@ CFO/Spend needs official Kalshi cash or open positions.
 ## Sequence
 1. Prefer `exchange_status` / `list_markets` if only public data needed.
 2. For balances: `cash_or_positions` with `include=balance` or `both`.
-3. Optional recent fills: `cash_or_positions` with `include=fills`.
+3. Recent fills are a separate read: `cash_or_positions` with `include=fills`. `both` does not include fills.
 4. If auth error, stop and ask Akash for a read-scoped API key — do not open the website unless he says so.
 
 ## Validate

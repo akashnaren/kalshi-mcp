@@ -1,0 +1,16 @@
+{
+  "name": "kalshi-readonly",
+  "displayName": "Kalshi (read-only)",
+  "version": "0.1.0",
+  "description": "Read-only Kalshi Trade API MCP — balance, positions, and fills. No trade or withdraw tools.",
+  "author": {
+    "name": "Akash Premkumar",
+    "url": "https://github.com/akashnaren"
+  },
+  "repository": "https://github.com/akashnaren/kalshi-mcp",
+  "homepage": "https://github.com/akashnaren/kalshi-mcp",
+  "license": "MIT",
+  "keywords": ["kalshi", "mcp", "finance", "read-only", "prediction-markets"],
+  "skills": "./skills/",
+  "mcpServers": "./mcp.json"
+}

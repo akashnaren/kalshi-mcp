@@ -45,6 +45,14 @@ export KALSHI_PRIVATE_KEY_PATH=/path/to/private.pem
 python3 -c 'import json; from kalshi_readonly.tools import cash_or_positions; print(json.dumps(cash_or_positions({"include":"both","limit":5}), indent=2))'
 ```
 
+## Install as a Cursor plugin
+
+The manifest is `.cursor-plugin/plugin.json` only (`kalshi-readonly`, version `0.1.0`). Skills are under `skills/`. Stdio launch is root `mcp.json`: command `python3`, args `${PLUGIN_ROOT}/server.py`, env `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH`, and `KALSHI_PRIVATE_KEY_PEM`. No secrets are committed.
+
+This repository is not published to the Cursor Marketplace or cursor.directory. After a publish, install with InstallPlugin. Until then, use the IDE `mcp.json` entry below.
+
+Grok Bot custom stdio AddMcpServer has been unreliable for this server. Prefer InstallPlugin after publish, or the IDE `mcp.json` entry. Do not paste the private key into chat.
+
 ## Cursor
 
 ```json
@@ -63,10 +71,6 @@ python3 -c 'import json; from kalshi_readonly.tools import cash_or_positions; pr
 ```
 
 `mcp.json` in this repo is the same launch for a plugin host (`${PLUGIN_ROOT}/server.py`).
-
-## Grok Bot
-
-AddMcpServer for a stdio server named `kalshi-readonly`. Command `python3`. Args are the absolute path of `server.py`. Set `KALSHI_API_KEY_ID` from the key id file and `KALSHI_PRIVATE_KEY_PATH` to the PEM path in that server's env. Do not paste the private key into chat.
 
 ## Tools
 
