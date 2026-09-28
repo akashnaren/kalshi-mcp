@@ -2,7 +2,7 @@
   "name": "kalshi-readonly",
   "displayName": "Kalshi (read-only)",
   "version": "0.1.0",
-  "description": "Read-only Kalshi Trade API MCP — balance, positions, and fills. No trade or withdraw tools.",
+  "description": "Read-only Kalshi Trade API MCP — balance, positions, and fills. Trade tools, when present, require confirm_only and KALSHI_SAFE_MODE=1. No withdraw.",
   "author": {
     "name": "Akash Premkumar",
     "url": "https://github.com/akashnaren"

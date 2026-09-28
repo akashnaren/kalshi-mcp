@@ -47,7 +47,7 @@ python3 -c 'import json; from kalshi_readonly.tools import cash_or_positions; pr
 
 ## Install as a Cursor plugin
 
-The manifest is `.cursor-plugin/plugin.json` only (`kalshi-readonly`, version `0.1.0`). Skills are under `skills/`. Stdio launch is root `mcp.json`: command `python3`, args `${PLUGIN_ROOT}/server.py`, env `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH`, and `KALSHI_PRIVATE_KEY_PEM`. No secrets are committed.
+Cursor hosts read `.cursor-plugin/plugin.json` (`kalshi-readonly`, version `0.1.0`). Root `plugin.json` and `mcp.json` stay in place. Skills are under `skills/`. Stdio launch is root `mcp.json`: command `python3`, args `${PLUGIN_ROOT}/server.py`, env `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH`, and `KALSHI_PRIVATE_KEY_PEM`. No secrets are committed.
 
 This repository is not published to the Cursor Marketplace or cursor.directory. After a publish, install with InstallPlugin. Until then, use the IDE `mcp.json` entry below.
 
