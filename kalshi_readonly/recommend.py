@@ -161,6 +161,7 @@ FIND_BEST_TOOL = {
     "description": (
         "Read-only ranking of open Kalshi markets. "
         "Score is estimated_confidence times payout_ratio divided by stake_needed. "
+        "Each row also reports edge_net_cents after the Kalshi fee dome, flb_band, kelly_frac 0.25, and stake_mode. "
         "Prefers a small stake and a high payout when confidence in that yes or no side is high. "
         "Pass beliefs with ticker, side (yes or no), confidence, and optional evidence. "
         "Without beliefs, returns a short research queue and no recommendations. "

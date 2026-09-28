@@ -71,9 +71,12 @@ Set these in the host env, not on the command line:
 
 - `KALSHI_API_KEY_ID`
 - `KALSHI_PRIVATE_KEY_PATH`
-- `KALSHI_SAFE_MODE=1`
+- `KALSHI_SAFE_MODE=1` for a read-only host
+- `KALSHI_SAFE_MODE=0` for the Finance Engineer sleeve, after install
 
 `KALSHI_SAFE_MODE=1` is the house default. Order tools stay unregistered. `find_best_bets` only reads. Do not commit the key file.
+
+The Finance Engineer sleeve sets `KALSHI_SAFE_MODE=0` and restarts the host. `place_order`, `cancel_order`, `amend_order`, and `decrease_order` then show up. Every one of those calls still needs `confirm: true`. Opening risk still has to fit the caps: about $2 until Kalshi fill history shows the sleeve is profitable, hard max $15, at most 15% of the sleeve in one market, and at most 30% in one `corr_group`. There is no withdraw tool and no deposit tool. The daily and end-of-day prompt is `fe_routine` and `harness/fe-grok-bot-routine.md`.
 
 ```json
 {
@@ -84,12 +87,14 @@ Set these in the host env, not on the command line:
       "env": {
         "KALSHI_API_KEY_ID": "your-key-id",
         "KALSHI_PRIVATE_KEY_PATH": "/absolute/path/to/private.pem",
-        "KALSHI_SAFE_MODE": "1"
+        "KALSHI_SAFE_MODE": "0"
       }
     }
   }
 }
 ```
+
+Use `"KALSHI_SAFE_MODE": "1"` when this host should stay read-only. `"0"` is only for the Finance Engineer sleeve. Restart after you change it so the tool list reloads.
 
 ## Cursor
 
@@ -117,7 +122,8 @@ Set these in the host env, not on the command line:
 | --- | --- |
 | `exchange_status` | Public exchange status |
 | `list_markets` | Public markets. Optional `limit` (default 5), `status`, `ticker` |
-| `find_best_bets` | Read-only rank. See Bets. Does not place orders |
+| `find_best_bets` | Read-only rank. See Bets. Does not place orders. Rows include `edge_net_cents`, `flb_band`, `kelly_frac`, and `stake_mode` |
+| `fe_routine` | Daily and end-of-day prompt for the Finance Engineer. Does not trade |
 | `cash_or_positions` | Cash and positions. `include`: `balance`, `cash`, `positions`, `both` (default), or `fills`. Optional `limit` (default 50) |
 | `list_open_orders` | Resting orders only (`status=resting`). Optional `ticker`, `limit` (default 100), `cursor`, `subaccount`. Read. No confirm |
 | `place_order` | One order. Hidden until safe mode is off. Requires `confirm: true` |
@@ -153,11 +159,21 @@ Defaults, all overridable inside a fixed range:
 
 Prices at or above 0.85 are never recommended. The scan also skips multivariate combos (`mve_filter=exclude`) so a page is not spent on them. A successful list is cached for about 45 seconds in the process. The Node entry keeps that process alive across tool calls.
 
-Every response includes `places_orders: false` and the sentence `do not place until Akash names the trade`. The Finance Engineer routine and a cron prompt you can paste into Grok Bot are in `harness/SKILL.md`.
+Every response includes `places_orders: false` and the sentence `do not place until Akash names the trade`. Each ranked row also reports `edge_net_cents` after the fee dome (`ceil(0.07 * contracts * price * (1 - price))` cents), `flb_band`, `kelly_frac` of 0.25, and `stake_mode`. A price at or under 10 cents is skipped unless that net edge is at least 8 cents. The rank score itself is unchanged. The Finance Engineer routine is `fe_routine` and `harness/fe-grok-bot-routine.md`.
 
 ## Trade
 
-Stake guardrail is **confirm_only**. There is no dollar max. The server will not choose a size, chase profit, or set `confirm` for you.
+Opening risk is capped in process. The server does not set `confirm` for you.
+
+| Cap | Default |
+| --- | --- |
+| Stake | $2 until fill history shows the sleeve is profitable. Prices under 25 cents stay at $2 |
+| Hard max | $15 per trade. A setting above 15 is ignored |
+| One market | 15% of the $71 sleeve |
+| One corr_group | 30% of the sleeve. Pass `corr_group` on `place_order` |
+| New notional per UTC day | $10 |
+
+Cancels and decreases do not add risk and are not size-capped. An amend that would increase risk is capped. Size above the $2 default requires at least three closing trades and a positive net on this account.
 
 `KALSHI_SAFE_MODE` defaults to on. Missing, empty, `1`, `true`, `yes`, `on`, and any other value keep it on. Only `0`, `false`, `no`, and `off` turn it off. While it is on:
 

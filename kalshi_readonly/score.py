@@ -5,17 +5,61 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN
 
 DO_NOT_PLACE = "do not place until Akash names the trade"
 FORMULA = "estimated_confidence * payout_ratio / stake_needed"
 RESEARCH_NOTE = "no confidence supplied; not a recommendation"
 
 _TICKER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{2,48}$")
+_CATEGORIES = frozenset({"Politics", "Crypto", "Sports", "Weather", "Finance", "Macro"})
+_VAGUE = frozenset({
+    "gut", "feeling", "hunch", "intuition", "vibe", "guess", "opinion", "yolo",
+})
+_FEE_BLIND = re.compile(r"fee[-\s]?blind|without fees|ignoring fees", re.IGNORECASE)
 _OPEN = frozenset({"active", "open"})
 _FOUR = Decimal("0.0001")
 _CENT = Decimal("0.01")
 _ONE = Decimal("1")
+
+
+def fee_dome_cents(price: Decimal, contracts: Decimal = Decimal(1)) -> Decimal:
+    """Kalshi taker fee in cents: ceil(0.07 * contracts * P * (1-P) * 100)."""
+    if not (Decimal(0) < price < Decimal(1)) or contracts <= 0:
+        return Decimal(0)
+    raw = Decimal("0.07") * contracts * price * (Decimal(1) - price) * Decimal(100)
+    return raw.to_integral_value(rounding=ROUND_CEILING)
+
+
+def flb_band(price: Decimal) -> str:
+    if price <= Decimal("0.10"):
+        return "<10¢"
+    if price < Decimal("0.25"):
+        return "10–25¢"
+    if price < Decimal("0.75"):
+        return "25–75¢"
+    if price < Decimal("0.90"):
+        return "75–90¢"
+    return "≥90¢"
+
+
+def stake_mode_for(price: Decimal) -> str:
+    if price < Decimal("0.25"):
+        return "fixed_2"
+    if price >= Decimal("0.50"):
+        return "modest"
+    return "kelly"
+
+
+def edge_net_cents(confidence: Decimal, ask: Decimal, bid: Decimal | None) -> Decimal:
+    """Confidence minus the ask, minus the fee dome and half the spread, in cents."""
+    fee = fee_dome_cents(ask, Decimal(1))
+    spread = Decimal(0)
+    if bid is not None and bid > 0 and ask > bid:
+        spread = (ask - bid) * Decimal(100) / Decimal(2)
+    gross = (confidence - ask) * Decimal(100)
+    return (gross - fee - spread).quantize(Decimal("0.01"))
 
 
 def score_formula(confidence: Decimal, payout_ratio: Decimal, stake: Decimal) -> Decimal:
@@ -125,6 +169,25 @@ def parse_options(args: dict) -> Options:
     )
 
 
+def _unit(value: object, field: str) -> Decimal:
+    if isinstance(value, bool):
+        raise RuntimeError(f"{field} must be from 0 to 1")
+    try:
+        if isinstance(value, str):
+            number = Decimal(value.strip())
+        elif isinstance(value, int):
+            number = Decimal(value)
+        elif isinstance(value, float):
+            number = Decimal(format(value, ".6f"))
+        else:
+            raise InvalidOperation
+    except (InvalidOperation, ValueError):
+        raise RuntimeError(f"{field} must be from 0 to 1") from None
+    if number < 0 or number > 1:
+        raise RuntimeError(f"{field} must be from 0 to 1")
+    return number
+
+
 def _confidence(value: object) -> Decimal:
     if isinstance(value, bool):
         raise RuntimeError("confidence must be greater than 0 and at most 1")
@@ -179,14 +242,35 @@ def parse_beliefs(raw: object) -> list[dict]:
         if key in seen:
             raise RuntimeError(f"duplicate belief for {ticker} {side}")
         seen.add(key)
-        found.append(
-            {
-                "ticker": ticker,
-                "side": side,
-                "confidence": _confidence(item.get("confidence")),
-                "evidence": _evidence(item.get("evidence")),
-            }
-        )
+        belief = {
+            "ticker": ticker,
+            "side": side,
+            "confidence": _confidence(item.get("confidence")),
+            "evidence": _evidence(item.get("evidence")),
+        }
+        if "key" in item and item.get("key") not in (None, ""):
+            name = item.get("key")
+            if not isinstance(name, str) or _KEY_RE.fullmatch(name) is None or name in _VAGUE:
+                raise RuntimeError("key must be a concrete snake_case indicator")
+            belief["key"] = name
+        if "category_tag" in item and item.get("category_tag") not in (None, ""):
+            tag = item.get("category_tag")
+            if tag not in _CATEGORIES:
+                raise RuntimeError("category_tag must be Politics, Crypto, Sports, Weather, Finance, or Macro")
+            belief["category_tag"] = tag
+        if "corr_group" in item and item.get("corr_group") not in (None, ""):
+            group = item.get("corr_group")
+            if not isinstance(group, str) or _KEY_RE.fullmatch(group) is None:
+                raise RuntimeError("corr_group must be a snake_case risk driver")
+            belief["corr_group"] = group
+        if "model_sources" in item and item.get("model_sources") not in (None, ""):
+            sources = item.get("model_sources")
+            if not isinstance(sources, str) or not (8 <= len(sources.strip()) <= 200):
+                raise RuntimeError("model_sources must name the model")
+            belief["model_sources"] = sources.strip()
+        if "settlement_match_score" in item and item.get("settlement_match_score") not in (None, ""):
+            belief["settlement_match_score"] = _unit(item.get("settlement_match_score"), "settlement_match_score")
+        found.append(belief)
     return found
 
 
@@ -273,6 +357,10 @@ def _empty_counts(scanned: int) -> dict[str, int]:
         "skipped_confidence": 0,
         "skipped_edge": 0,
         "skipped_risk": 0,
+        "skipped_flb": 0,
+        "skipped_fee_blind": 0,
+        "skipped_settlement": 0,
+        "skipped_yes_replicate": 0,
     }
 
 
@@ -290,6 +378,7 @@ def _screen(market: dict, side: str, options: Options, now: datetime) -> tuple[d
     if volume is None or volume < options.min_volume:
         return None, "skipped_liquidity"
     stake, ask_size = _side_quote(market, side)
+    bid = _price(market, "yes_bid_dollars", "yes_bid") if side == "yes" else _price(market, "no_bid_dollars", "no_bid")
     if stake is None or stake < options.min_price or stake >= options.price_ceiling or stake > options.max_price:
         return None, "skipped_price"
     notional = _notional(market)
@@ -303,6 +392,7 @@ def _screen(market: dict, side: str, options: Options, now: datetime) -> tuple[d
         "close_time": close_time,
         "volume": volume,
         "stake": stake,
+        "bid": bid,
         "ask_size": ask_size,
         "notional": notional,
         "profit": profit,
@@ -318,6 +408,17 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
     edge = confidence - implied
     if edge < options.min_edge:
         return None, "skipped_edge"
+    text_blob = " ".join(
+        part for part in (belief.get("evidence"), belief.get("model_sources")) if isinstance(part, str)
+    )
+    if _FEE_BLIND.search(text_blob):
+        return None, "skipped_fee_blind"
+    match = belief.get("settlement_match_score")
+    if match is not None and match < 1:
+        return None, "skipped_settlement"
+    net_cents = edge_net_cents(confidence, screened["stake"], screened.get("bid"))
+    if screened["stake"] <= Decimal("0.10") and net_cents < Decimal(8):
+        return None, "skipped_flb"
     affordable = int((options.max_risk / screened["stake"]).to_integral_value(rounding=ROUND_DOWN))
     size_cap = int(screened["ask_size"].to_integral_value(rounding=ROUND_DOWN))
     contracts = min(affordable, size_cap)
@@ -369,11 +470,60 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
         "hours_to_expiry": f"{screened['hours']:.2f}",
         "close_time": screened["close_time"],
         "evidence": evidence,
+        "key": belief.get("key"),
+        "category_tag": belief.get("category_tag"),
+        "corr_group": belief.get("corr_group"),
+        "model_sources": belief.get("model_sources"),
+        "edge_net_cents": format(net_cents, "f"),
+        "flb_band": flb_band(screened["stake"]),
+        "fee_entry_cents": format(fee_dome_cents(screened["stake"], Decimal(1)), "f"),
+        "fee_dome": "ceil(0.07 * contracts * price * (1 - price)) cents",
+        "kelly_frac": "0.25",
+        "stake_mode": stake_mode_for(screened["stake"]),
+        "yes_no_replicate": "clear",
         "rationale": " ".join(parts),
         "do_not_place": DO_NOT_PLACE,
         "_score": score,
         "_edge": edge,
     }, None
+
+
+def _drop_dominated_yes(ranked: list[dict], by_ticker: dict[str, dict], counts: dict[str, int]) -> list[dict]:
+    """Drop a yes buy when the yes mids in that event sum above 1 plus fees."""
+    legs: dict[str, list[tuple[str, Decimal, Decimal]]] = {}
+    for market in by_ticker.values():
+        event = market.get("event_ticker")
+        ticker = market.get("ticker")
+        if not isinstance(event, str) or not isinstance(ticker, str):
+            continue
+        bid = _price(market, "yes_bid_dollars", "yes_bid")
+        ask = _price(market, "yes_ask_dollars", "yes_ask")
+        if bid is None or ask is None:
+            continue
+        mid = (bid + ask) / Decimal(2)
+        fee = fee_dome_cents(mid, Decimal(1)) / Decimal(100)
+        legs.setdefault(event, []).append((ticker, mid, fee))
+    dominated: set[str] = set()
+    cheaper: set[str] = set()
+    for group in legs.values():
+        if len(group) < 2:
+            continue
+        if sum(mid for _ticker, mid, _fee in group) <= Decimal(1) + sum(fee for _ticker, _mid, fee in group):
+            continue
+        best = min(group, key=lambda item: (item[1], item[0]))
+        cheaper.add(best[0])
+        for ticker, _mid, _fee in group:
+            if ticker != best[0]:
+                dominated.add(ticker)
+    kept: list[dict] = []
+    for row in ranked:
+        if row.get("side") == "yes" and row.get("ticker") in dominated:
+            counts["skipped_yes_replicate"] += 1
+            continue
+        if row.get("side") == "yes" and row.get("ticker") in cheaper:
+            row["yes_no_replicate"] = "cheaper_leg"
+        kept.append(row)
+    return kept
 
 
 def rank_markets(
@@ -407,6 +557,7 @@ def rank_markets(
             counts[reason or "skipped_market"] += 1
             continue
         ranked.append(row)
+    ranked = _drop_dominated_yes(ranked, by_ticker, counts)
     ranked.sort(key=lambda item: (-item["_score"], -item["_edge"], item["ticker"], item["side"]))
     shown = ranked[: options.limit]
     counts["truncated"] = len(ranked) - len(shown)
