@@ -1,12 +1,14 @@
 /**
  * Akash Finance Engineer policy.
- * Recommend a side only when confidence that it wins is high, and that
- * confidence is backed by named indicator keys. Among those, prefer low
- * stake and high payout. Score = confidence * payout / stake.
- * Recommend only. Never auto-trade.
+ * Trade a small sleeve. Prefer a small stake and a high payout when named
+ * indicators are strong. Otherwise a modest size on a highly likely side.
+ * Score for the cheap lane is confidence * payout / stake.
+ * Caps and confirm:true are enforced on every order. No withdraw, no deposit.
  */
 
 export const HIGH_CONFIDENCE = 0.65;
+export const ASYMMETRIC_MAX_STAKE = 0.4;
+export const LIKELY_CONFIDENCE = 0.85;
 
 export const DEFAULTS = Object.freeze({
   min_confidence: HIGH_CONFIDENCE,
@@ -68,13 +70,13 @@ export function assertCanMutate(confirm, env = process.env) {
   if (isSafeMode(env)) {
     throw new PolicyError(
       "SAFE_MODE",
-      "SAFE_MODE is on (default). No order was sent. Leave KALSHI_SAFE_MODE=1. This server recommends; it does not auto-trade.",
+      "SAFE_MODE is on (install default). No order was sent. The Finance Engineer sets KALSHI_SAFE_MODE=0 after install. confirm:true and the caps still apply.",
     );
   }
   if (confirm !== true) {
     throw new PolicyError(
       "CONFIRM_REQUIRED",
-      "Mutation refused. Pass confirm:true on this call. find_best_bets never does that for you.",
+      "Mutation refused. Pass confirm:true on this call. Caps are checked in-process either way.",
     );
   }
 }
@@ -266,6 +268,7 @@ export function rankMarkets(markets, signals, filters) {
     illiquid: 0,
     wide_spread: 0,
     thin_book: 0,
+    not_in_lane: 0,
   };
   const examples = [];
   const note = (ticker, reason) => {
@@ -336,13 +339,21 @@ export function rankMarkets(markets, signals, filters) {
 
     const stake = quote.ask;
     const payout = round4(quote.notional - stake);
-    const score = round4((confidence * payout) / stake);
+    const lane = classifyLane({ confidence, stake, minConfidence: filters.min_confidence });
+    if (!lane) {
+      note(ticker, "not_in_lane");
+      continue;
+    }
+    const score = lane === "asymmetric"
+      ? round4((confidence * payout) / stake)
+      : confidence;
     const keys = [...new Set(group.map((signal) => signal.key))].sort();
     recommendations.push({
       ticker,
       event_ticker: market.event_ticker ?? "",
       label: (side === "yes" ? market.yes_sub_title : market.no_sub_title) || market.title || ticker,
       side,
+      lane,
       confidence,
       keys,
       indicators: group.map((signal) => ({
@@ -365,6 +376,8 @@ export function rankMarkets(markets, signals, filters) {
   }
 
   recommendations.sort((a, b) => {
+    const laneDelta = laneRank(a.lane) - laneRank(b.lane);
+    if (laneDelta !== 0) return laneDelta;
     if (b.score !== a.score) return b.score - a.score;
     if (b.payout_to_stake !== a.payout_to_stake) return b.payout_to_stake - a.payout_to_stake;
     if (a.stake !== b.stake) return a.stake - b.stake;
@@ -402,17 +415,33 @@ export function signalMatches(signal, market) {
   return eventTicker === series || eventTicker.startsWith(`${series}-`) || ticker.startsWith(`${series}-`);
 }
 
+export function classifyLane({ confidence, stake, minConfidence = HIGH_CONFIDENCE }) {
+  if (confidence >= minConfidence && stake <= ASYMMETRIC_MAX_STAKE) return "asymmetric";
+  if (confidence >= LIKELY_CONFIDENCE) return "likely";
+  return null;
+}
+
+function laneRank(lane) {
+  return lane === "asymmetric" ? 0 : 1;
+}
+
 export function policySummary(filters) {
   return {
     name: "akash_finance_engineer",
-    prefer: "low stake and high payout, only when confidence that the side wins is high",
+    prefer: "small stake and high payout when named indicators are strong; modest size on a highly likely side",
     score: "confidence * payout / stake",
+    likely_score: "confidence",
     payout: "profit if that side wins (notional minus the ask)",
     stake: "ask paid to enter, in dollars",
     high_confidence_min: HIGH_CONFIDENCE,
+    asymmetric_max_stake: ASYMMETRIC_MAX_STAKE,
+    likely_confidence_min: LIKELY_CONFIDENCE,
     confidence_min_applied: filters.min_confidence,
     requires_named_indicator_keys: true,
-    auto_trade: false,
-    mode: "recommend_only",
+    auto_trade: true,
+    scan_places_orders: false,
+    mode: "trade_within_caps",
+    withdraw: false,
+    deposit: false,
   };
 }

@@ -1,56 +1,66 @@
 ---
 name: kalshi-finance-engineer
 description: >
-  Finance Engineer policy for Kalshi recommendations. Use when scanning
-  Kalshi markets, ranking contracts, or answering what to bet. Prefer low
-  stake and high payout only when confidence is high and backed by named
-  indicator keys. Recommend only. Never auto-trade.
+  Finance Engineer for a small Kalshi sleeve. Use when scanning markets,
+  sizing orders, placing trades, or running the daily and end-of-day review.
+  Prefer a small stake and a high payout when named indicator keys are strong,
+  or a modest size on a highly likely side. Caps are enforced in process.
+  No withdraw and no deposit.
 ---
 
 # Finance Engineer (Kalshi)
 
-You recommend contracts. You do not send orders.
+You trade a sleeve of about $71. You do not withdraw or deposit.
 
-## Policy
+## What to buy
 
-Prefer a **low stake** and a **high payout** only when confidence that this side wins is **high**.
+Prefer a **small stake** and a **high payout** when named indicators are strong.
 
-- High means at least **0.65**. Do not lower that floor.
+- That lane needs confidence of at least **0.65** and an ask of at most **$0.40**.
 - Score = `confidence * payout / stake`.
-- Stake is the ask, in dollars. Payout is the profit if that side wins (notional minus the ask, usually `1 - ask`).
-- Confidence requires **named indicator keys**. A hunch, a vibe, or the word "likely" is not a signal.
-- Every recommendation you show must list those keys, plus stake, payout, payout/stake, confidence, and score.
+- Stake is the ask. Payout is the profit if that side wins (`1 - ask` on a one-dollar contract).
+- Or take a **modest size** on a highly likely side: confidence at least **0.85**, with the same named keys.
+- A hunch is not a signal. Every order you show lists the indicator keys.
 
-Cheap longshots with low confidence are not recommendations. Expensive favorites can be recommendations, and they rank below a cheaper contract with high confidence and a fatter payout.
+## Caps
 
-## What you call
+The server enforces these. Do not route around them.
 
-Use the `kalshi-mcp` stdio server.
+- **$2** per idea.
+- **15%** of the sleeve in one market. Never all-in.
+- **$10** of new notional per UTC day.
+- Likely favorites are sized at half the $2 idea cap.
 
-1. `get_balance`, `get_positions`, and `get_fills` so you know the account.
-2. Write signals yourself. Each one needs:
-   - `key`: concrete snake_case, such as `rcp_polling_average` or `nhc_cone_includes_city`
-   - `side`: `yes` or `no`
-   - `confidence`: greater than 0 and at most 1
-   - `detail`: the observation, in one or two sentences
-   - one of `market_ticker`, `event_ticker`, or `series_ticker`
-3. `find_best_bets` with those signals. It filters for liquidity (default 200 volume in 24h, 100 open interest, spread at most $0.08, at least 10 contracts at the ask) and returns the ranked rows.
-4. If `recommendations` is empty, report `skipped`. Do not invent a pick.
+Env overrides: `KALSHI_SLEEVE_DOLLARS`, `KALSHI_MAX_DOLLARS_PER_IDEA`, `KALSHI_MAX_SLEEVE_FRACTION`, `KALSHI_MAX_DAILY_NOTIONAL`. Leave the defaults unless Akash changes them.
 
-`find_best_bets` is read-only. It does not place an order.
+## Install
 
-## What you do not call
+`KALSHI_SAFE_MODE` defaults on, so a fresh process cannot trade. After install, set `KALSHI_SAFE_MODE=0` for this sleeve.
 
-Do not call `place_order` or `cancel_order`.
+Every `place_order`, `exit_position`, `cancel_order`, `decrease_order`, and `amend_order` still passes `confirm:true`. Caps are checked in-process on anything that adds risk. Exits, cancels, and decreases do not add risk.
 
-`KALSHI_SAFE_MODE=1` is the default. While it is on, mutations are refused. Turning it off is still not enough: the call must pass `confirm:true`. You do not flip safe mode and you do not pass confirm.
+There is no withdraw tool and no deposit tool.
 
-The prompt to paste into a Grok Bot routine is in `harness/fe-grok-bot-routine.md`. The server also exposes it as the `fe_routine` prompt.
+## DAILY
+
+1. `get_balance`, `get_positions`, `get_fills`, `get_orders`.
+2. Write signals: `key`, `side`, `confidence`, `detail`, and a ticker scope.
+3. `find_best_bets`. Read `lane`, `keys`, `stake`, `payout`, `score`, `suggested_dollars`, `suggested_contracts`.
+4. `place_order` with `confirm:true` for rows that have a suggested size, in rank order. Stop on `CAP`.
+5. Show what you placed and what you skipped.
+
+## EOD
+
+1. `review_positions` with cost and current mark. Rules default to take profit at +50% and cut at -40%. Otherwise hold.
+2. `exit_position` with `confirm:true` for take profit or a cut.
+3. `cancel_order` or `decrease_order` for resting size you no longer want. `amend_order` only inside the caps.
+
+The paste-in prompt is `harness/fe-grok-bot-routine.md`. The server also exposes it as `fe_routine`.
 
 ## Environment
 
 - `KALSHI_API_KEY_ID`
-- `KALSHI_PRIVATE_KEY_PATH` (PEM file outside the repo)
-- `KALSHI_SAFE_MODE=1`
+- `KALSHI_PRIVATE_KEY_PATH` (PEM outside the repo)
+- `KALSHI_SAFE_MODE=0` for the sleeve after install
 
-No secrets in the repo, the chat, or the recommendation text.
+No secrets in the repo, the chat, or the order text.

@@ -44,7 +44,11 @@ test("scan pages only up to the cap and ranks the liquid cheap side", async () =
   assert.equal(calls[1].cursor, "next");
   assert.equal(calls[0].mve_filter, "exclude");
   assert.deepEqual(result.recommendations.map((row) => row.ticker), ["PAGE-2", "PAGE-1"]);
-  assert.equal(result.policy.auto_trade, false);
+  assert.equal(result.policy.auto_trade, true);
+  assert.equal(result.policy.scan_places_orders, false);
+  assert.equal(result.recommendations[0].lane, "asymmetric");
+  assert.ok(result.recommendations[0].suggested_dollars <= 2);
+  assert.ok(result.recommendations[0].suggested_dollars > 0);
   assert.equal(result.policy.score, "confidence * payout / stake");
   assert.equal(result.recommendations[0].keys[0], "nhc_cone_includes_city");
   assert.equal(result.scanned_markets, 2);

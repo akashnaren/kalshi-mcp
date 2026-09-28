@@ -120,6 +120,20 @@ test("disagreement and thin books are not recommendations", () => {
   assert.equal(ranked.skipped.illiquid, 1);
 });
 
+test("a medium favorite without high confidence is not a lane", () => {
+  const ranked = rankMarkets(
+    [market({
+      ticker: "MID-1",
+      yes_bid_dollars: "0.6800",
+      yes_ask_dollars: "0.7000",
+    })],
+    [signal({ market_ticker: "MID-1", confidence: 0.7, key: "rcp_polling_average", detail: "RCP average is 62 percent" })],
+    filters(),
+  );
+  assert.equal(ranked.recommendations.length, 0);
+  assert.equal(ranked.skipped.not_in_lane, 1);
+});
+
 test("legacy cent quotes still produce a stake and a payout", () => {
   const ranked = rankMarkets(
     [market({

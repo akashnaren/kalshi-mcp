@@ -16,7 +16,14 @@ test("harness skill and routine carry the policy", () => {
     assert.match(text, /KALSHI_SAFE_MODE/);
     assert.match(text, /confirm:true/);
     assert.match(text, /find_best_bets/);
+    assert.match(text, /\$2/);
+    assert.match(text, /15%/);
+    assert.match(text, /\$10/);
+    assert.match(text, /DAILY/);
+    assert.match(text, /EOD/);
   }
+  assert.match(skill, /KALSHI_SAFE_MODE=0/);
+  assert.match(skill, /withdraw/i);
   assert.match(skill, /named indicator/i);
   assert.ok(routineFile.includes(FE_ROUTINE));
   assert.match(readme, /KALSHI_API_KEY_ID/);

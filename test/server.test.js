@@ -57,13 +57,20 @@ test("tool list is read-heavy and find_best_bets returns named keys", async () =
     const listed = await client.listTools();
     const names = listed.tools.map((tool) => tool.name).sort();
     assert.deepEqual(names, [
+      "amend_order",
       "cancel_order",
+      "decrease_order",
+      "exit_position",
       "find_best_bets",
       "get_balance",
       "get_fills",
+      "get_orders",
       "get_positions",
       "place_order",
+      "review_positions",
     ]);
+    assert.equal(names.includes("withdraw"), false);
+    assert.equal(names.includes("deposit"), false);
     const finder = listed.tools.find((tool) => tool.name === "find_best_bets");
     assert.equal(finder.annotations.readOnlyHint, true);
 
@@ -75,7 +82,10 @@ test("tool list is read-heavy and find_best_bets returns named keys", async () =
     assert.equal(payload.recommendations.length, 1);
     assert.deepEqual(payload.recommendations[0].keys, ["nhc_cone_includes_city"]);
     assert.equal(payload.safe_mode, true);
-    assert.equal(payload.policy.auto_trade, false);
+    assert.equal(payload.policy.auto_trade, true);
+    assert.equal(payload.policy.scan_places_orders, false);
+    assert.equal(payload.recommendations[0].lane, "asymmetric");
+    assert.ok(payload.recommendations[0].suggested_dollars <= 2);
     const balance = await client.callTool({ name: "get_balance", arguments: {} });
     assert.equal(JSON.parse(balance.content[0].text).balance, 2500);
     assert.equal(kalshi.calls.includes("create"), false);
@@ -108,6 +118,40 @@ test("default env and explicit safe mode both refuse mutations", async () => {
       assert.equal(kalshi.calls.includes("cancel"), false);
     });
   }
+});
+
+test("live sleeve rejects an oversized order and still exits", async () => {
+  await withClient({ KALSHI_SAFE_MODE: "0" }, async (client, kalshi) => {
+    kalshi.getPositions = async () => ({
+      market_positions: [{ ticker: "KXTEST-26-T1", position_fp: "4.00", market_exposure_dollars: "1.00" }],
+    });
+    const blocked = await client.callTool({
+      name: "place_order",
+      arguments: { confirm: true, ticker: "KXTEST-26-T1", side: "bid", count: 20, price: 0.5 },
+    });
+    assert.equal(blocked.isError, true);
+    assert.match(blocked.content[0].text, /CAP/);
+    assert.equal(kalshi.calls.includes("create"), false);
+
+    const placed = await client.callTool({
+      name: "place_order",
+      arguments: { confirm: true, ticker: "KXOTHER-1", side: "bid", count: 4, price: 0.5 },
+    });
+    assert.equal(placed.isError, undefined);
+    const review = await client.callTool({
+      name: "review_positions",
+      arguments: { positions: [{ ticker: "KXTEST-26-T1", cost: 1, mark: 1.6 }] },
+    });
+    const reviewed = JSON.parse(review.content[0].text);
+    assert.equal(reviewed.reviews[0].action, "take_profit");
+
+    const exited = await client.callTool({
+      name: "exit_position",
+      arguments: { confirm: true, ticker: "KXTEST-26-T1", price: 0.4 },
+    });
+    assert.equal(exited.isError, undefined);
+    assert.equal(kalshi.calls.filter((call) => call === "create").length, 2);
+  });
 });
 
 test("stdio entry lists tools and stays in safe mode", async () => {

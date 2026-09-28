@@ -1,23 +1,39 @@
 # kalshi-mcp
 
-A small Kalshi connector for Grok Bot and Cursor. It reads balance, positions, and fills, and it ranks contracts you already have evidence for.
+Kalshi connector for the Finance Engineer sleeve. It scans markets, sizes ideas, and can place or exit orders inside hard caps. It cannot withdraw or deposit.
 
-It recommends. It does not trade unless you turn safe mode off and pass `confirm:true` on that specific call. The scanner never does either of those.
+The sleeve starts around $71.
 
 ## The rule
 
-Prefer a low stake and a high payout when confidence that this side wins is high.
+Prefer a small stake and a high payout when named indicators are strong. That means confidence of at least 0.65 and an ask of at most $0.40. The score is `confidence * payout / stake`.
 
-High means at least 0.65. Confidence has to come from named indicators. Every recommendation lists those keys. A hunch does not count.
+Or take a modest size on a highly likely side, confidence at least 0.85, when the signals are clear. Modest means half of the per-idea cap.
 
-The score is `confidence * payout / stake`.
+Every idea lists its indicator keys. A hunch is rejected.
 
-- Stake is the ask you would pay, in dollars.
-- Payout is the profit if that side wins. On a one-dollar contract that is `1 - ask`.
+A 15 cent contract at 0.80 confidence scores about 4.53 and can be sized up to $2. A 70 cent contract at 0.90 confidence is the likely lane and is sized smaller. A 5 cent contract at 0.40 confidence is dropped.
 
-A 15 cent contract at 0.80 confidence scores about 4.53. A 70 cent contract at 0.90 confidence scores about 0.39. The cheap one ranks first. A 5 cent contract at 0.40 confidence is dropped, because 0.40 is not high.
+## Caps
 
-Liquidity still has to be there. Defaults: 200 contracts of volume in the last day, 100 of open interest, bid-ask spread of at most 8 cents, and at least 10 contracts at the ask. The scan reads those quotes from the market list. It does not request an order book for every market.
+These are checked in the process before any order that adds risk. Defaults:
+
+| Cap | Default | Env |
+| --- | --- | --- |
+| Per idea | $2 | `KALSHI_MAX_DOLLARS_PER_IDEA` |
+| Per market | 15% of the sleeve | `KALSHI_MAX_SLEEVE_FRACTION` |
+| Sleeve | $71 | `KALSHI_SLEEVE_DOLLARS` |
+| New notional per UTC day | $10 | `KALSHI_MAX_DAILY_NOTIONAL` |
+
+15% of $71 is $10.65, so one market cannot take the sleeve. A single idea still stops at $2. The daily cap stops at $10 even if you have room in a market.
+
+Take profit defaults to +50% (`KALSHI_TAKE_PROFIT_RETURN`). A cut defaults to -40% (`KALSHI_CUT_LOSS_RETURN`). Anything in between is a hold.
+
+## Safe mode
+
+`KALSHI_SAFE_MODE` defaults on, including when it is unset. A fresh checkout will not trade.
+
+After install, the Finance Engineer sets `KALSHI_SAFE_MODE=0`. Orders still need `confirm:true` on that call, and they still have to fit the caps. Turning safe mode off is not a blank check.
 
 ## Run it
 
@@ -29,7 +45,7 @@ npm test
 npm start
 ```
 
-`npm start` speaks MCP over stdin and stdout. That is the process Grok Bot should launch. Logs go to stderr, not stdout.
+`npm start` speaks MCP over stdin and stdout. That is the process Grok Bot should launch.
 
 ```json
 {
@@ -40,58 +56,43 @@ npm start
       "env": {
         "KALSHI_API_KEY_ID": "your-key-id",
         "KALSHI_PRIVATE_KEY_PATH": "/home/you/.kalshi/kalshi.key",
-        "KALSHI_SAFE_MODE": "1"
+        "KALSHI_SAFE_MODE": "0"
       }
     }
   }
 }
 ```
 
-Put the real key id in the environment of the process, not in git. The private key is a PEM file that stays outside this repo.
+Put the real key id in the environment of the process, not in git. The private key stays outside this repo. Leave the cap env vars unset to keep the defaults.
 
 | Variable | Purpose |
 | --- | --- |
-| `KALSHI_API_KEY_ID` | Key id from Kalshi → Account & security → API Keys. Public market scans work without it. Balance, positions, and fills need it. |
+| `KALSHI_API_KEY_ID` | Key id from Kalshi. Public scans work without it. Trading needs it. |
 | `KALSHI_PRIVATE_KEY_PATH` | Path to the PEM. RSA or Ed25519. Never commit this file. |
-| `KALSHI_SAFE_MODE` | `1` is the default, including when the variable is unset. Mutations are refused. |
-| `KALSHI_BASE_URL` | Optional. Defaults to `https://external-api.kalshi.com/trade-api/v2`. Demo: `https://external-api.demo.kalshi.co/trade-api/v2`. |
-
-Copy `.env.example` if you want a local env file. `.env` is gitignored.
+| `KALSHI_SAFE_MODE` | Unset or `1` refuses every order. `0` allows orders that pass `confirm:true` and the caps. Set `0` only for this sleeve, after install. |
+| `KALSHI_BASE_URL` | Optional. Defaults to `https://external-api.kalshi.com/trade-api/v2`. |
 
 ## Tools
 
 | Tool | What it does |
 | --- | --- |
-| `get_balance` | Portfolio balance. |
-| `get_positions` | Open positions. |
-| `get_fills` | Recent fills. |
-| `find_best_bets` | Read-only ranker. You pass signals. It returns recommendations with keys, stake, payout, and score. |
-| `place_order` | Refused while safe mode is on. Also refused unless `confirm:true`. `bid` buys YES. `ask` sells YES. |
-| `cancel_order` | Same two locks. Needs the order id and the market ticker. |
+| `get_balance`, `get_positions`, `get_fills`, `get_orders` | Read the account. |
+| `find_best_bets` | Rank ideas and suggest a size inside the caps. Does not send an order. |
+| `review_positions` | Mark each position take profit, cut, or hold. |
+| `place_order` | Needs `confirm:true`, safe mode off, and room under the caps. |
+| `exit_position` | Close some or all of one position. Needs `confirm:true`. |
+| `cancel_order`, `decrease_order` | Shrink resting risk. Need `confirm:true`. |
+| `amend_order` | Reprice or resize. A bigger size is cap-checked. |
 
-There is also an `fe_routine` prompt with the same instructions as the Grok Bot snippet.
+`bid` buys YES. `ask` sells YES. Buying NO is an ask priced at one minus the NO price.
 
-A signal looks like this:
-
-```json
-{
-  "key": "rcp_polling_average",
-  "side": "yes",
-  "confidence": 0.72,
-  "detail": "RCP average is 61 percent versus a 22 cent ask",
-  "market_ticker": "KXEXAMPLE-26-T1"
-}
-```
-
-`market_ticker` is the narrowest scope. Use `event_ticker` or `series_ticker` when the indicator covers a group. The scanner refuses a pile of unrelated queries (more than 8) so it stays fast.
-
-If two signals disagree on the side, that market is skipped as a conflict. Two signals that agree keep both keys. Confidence is the stronger of the two, not a blend, so two weak hunches cannot add up to a recommendation.
-
-## For the Finance Engineer bot
+## Daily and end of day
 
 The operating notes are in `harness/SKILL.md`. The text to paste into a Grok Bot routine is in `harness/fe-grok-bot-routine.md`.
 
-The routine's job is to gather named signals, call `find_best_bets`, and show the rows. It does not call `place_order`.
+DAILY: read the account, scan with named signals, place the suggested size, stop when a cap says no.
+
+EOD: review hold, cut, or take profit, then exit or shrink resting orders. No new risk past the daily cap.
 
 ## Tests
 
@@ -99,4 +100,4 @@ The routine's job is to gather named signals, call `find_best_bets`, and show th
 npm test
 ```
 
-That checks the score, the confidence floor, the liquidity filters, the safe-mode locks, request signing, and that the stdio process actually starts.
+That checks the score, both lanes, the $2 / 15% / $10 caps, the safe-mode lock, and that the stdio process starts.

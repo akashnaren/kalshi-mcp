@@ -68,12 +68,24 @@ export class KalshiClient {
     return this.request("GET", "/portfolio/fills", { query, auth: true });
   }
 
+  getOrders(query) {
+    return this.request("GET", "/portfolio/orders", { query, auth: true });
+  }
+
   createOrder(body) {
     return this.request("POST", "/portfolio/events/orders", { body, auth: true });
   }
 
   cancelOrder(orderId, query) {
     return this.request("DELETE", `/portfolio/events/orders/${encodeURIComponent(orderId)}`, { query, auth: true });
+  }
+
+  amendOrder(orderId, body) {
+    return this.request("POST", `/portfolio/events/orders/${encodeURIComponent(orderId)}/amend`, { body, auth: true });
+  }
+
+  decreaseOrder(orderId, body) {
+    return this.request("POST", `/portfolio/events/orders/${encodeURIComponent(orderId)}/decrease`, { body, auth: true });
   }
 
   async request(method, path, { query, body, auth = false } = {}) {
