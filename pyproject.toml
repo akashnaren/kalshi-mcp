@@ -1,0 +1,23 @@
+[project]
+name = "kalshi-readonly"
+version = "0.2.0"
+description = "Kalshi Trade API MCP. Read tools plus confirm-gated orders behind KALSHI_SAFE_MODE."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["cryptography==41.0.7"]
+
+[project.optional-dependencies]
+dev = ["pytest==8.4.2"]
+
+[project.scripts]
+kalshi-readonly = "kalshi_readonly.tools:main"
+
+[tool.setuptools.packages.find]
+include = ["kalshi_readonly*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,16 @@
+{
+  "name": "kalshi-readonly",
+  "displayName": "Kalshi",
+  "version": "0.2.0",
+  "description": "Kalshi Trade API MCP — markets, cash, and positions. Order tools stay unregistered while KALSHI_SAFE_MODE is on (default) and require confirm=true. No withdraw.",
+  "author": {
+    "name": "Akash Premkumar",
+    "url": "https://github.com/akashnaren"
+  },
+  "repository": "https://github.com/akashnaren/kalshi-mcp",
+  "homepage": "https://github.com/akashnaren/kalshi-mcp",
+  "license": "MIT",
+  "keywords": ["kalshi", "mcp", "finance", "read-only", "prediction-markets", "orders"],
+  "skills": "./skills/",
+  "mcpServers": "./mcp.json"
+}
