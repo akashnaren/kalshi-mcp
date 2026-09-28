@@ -19,4 +19,4 @@ CFO/Spend needs official Kalshi cash or open positions.
 Balance returns `balance_cents` and `balance_dollars` (`cash` is that dollar string). `portfolio_value` only when the API sends it. Positions list market and event rows with ticker and `qty`. Market `side` is the official quantity sign (positive YES, negative NO) unless the payload already has `side`. `avg` and `mark` only when the API sends them. Do not invent remaining-to-recover.
 
 ## Trade
-This skill only reads. When trade tools are present, they require `confirm_only` and safe mode (`KALSHI_SAFE_MODE=1`, the default). There is no dollar cap. Do not place, cancel, or withdraw from this skill.
+This skill only reads. Order tools are separate and stay off while `KALSHI_SAFE_MODE` is on (the default). When it is off, they still require boolean `confirm: true` from Akash. There is no dollar cap. Do not place, cancel, or withdraw from this skill.

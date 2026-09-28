@@ -1,4 +1,4 @@
-"""Load the API key and sign GET requests. Never log or return the private key."""
+"""Load the API key and sign requests. Never log or return the private key."""
 
 from __future__ import annotations
 

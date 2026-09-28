@@ -19,6 +19,28 @@ def _pem() -> tuple[rsa.RSAPrivateKey, str]:
     return key, pem
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "message"),
+    [
+        ("post", "/trade-api/v2/portfolio/events/orders", b"1703123456789POST/trade-api/v2/portfolio/events/orders"),
+        (
+            "delete",
+            "/trade-api/v2/portfolio/events/orders/ord-1?market_ticker=KXTEST",
+            b"1703123456789DELETE/trade-api/v2/portfolio/events/orders/ord-1",
+        ),
+    ],
+)
+def test_post_and_delete_use_the_same_pss_rule(method: str, path: str, message: bytes) -> None:
+    key, pem = _pem()
+    signature = sign_request(pem, "1703123456789", method, path)
+    key.public_key().verify(
+        base64.b64decode(signature),
+        message,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+        hashes.SHA256(),
+    )
+
+
 def test_signature_covers_timestamp_method_and_path_without_query() -> None:
     key, pem = _pem()
     signature = sign_request(pem, "1703123456789", "get", "/trade-api/v2/portfolio/balance?limit=5")

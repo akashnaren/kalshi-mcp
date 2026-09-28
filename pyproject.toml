@@ -1,7 +1,7 @@
 [project]
 name = "kalshi-readonly"
-version = "0.1.0"
-description = "Read-only Kalshi Trade API MCP server."
+version = "0.2.0"
+description = "Kalshi Trade API MCP. Read tools plus confirm-gated orders behind KALSHI_SAFE_MODE."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["cryptography==41.0.7"]

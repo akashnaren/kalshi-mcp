@@ -1,7 +1,7 @@
 {
   "name": "kalshi-readonly",
-  "version": "0.1.0",
-  "description": "Kalshi read-only MCP — public markets/status plus auth-gated cash_or_positions. No trade/withdraw tools.",
+  "version": "0.2.0",
+  "description": "Kalshi MCP — public markets and auth-gated cash/positions, plus confirm-gated order tools that stay unregistered while KALSHI_SAFE_MODE is on (default). No withdraw or deposit.",
   "skills": "./skills/",
   "mcpServers": "./mcp.json"
 }

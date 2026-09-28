@@ -1,11 +1,23 @@
-"""The three read-only tools. No order, cancel, or transfer handlers exist."""
+"""Read tools plus confirm-gated order tools.
+
+Mutating tools are omitted from the advertised list while KALSHI_SAFE_MODE is
+on (the default). Handlers still refuse if something calls them anyway.
+There is no withdraw, deposit, or strategy tool.
+"""
 
 from __future__ import annotations
 
 from kalshi_readonly import __version__
+from kalshi_readonly.guard import safe_mode_enabled
 from kalshi_readonly.http import auth_get, public_get
 from kalshi_readonly.report import present_balance, present_fills, present_positions
 from kalshi_readonly.stdio import run_server
+from kalshi_readonly.trade import (
+    MUTATING_HANDLERS,
+    MUTATING_TOOLS,
+    OPEN_ORDERS_TOOL,
+    list_open_orders,
+)
 
 _INCLUDES = ("balance", "cash", "positions", "both", "fills")
 
@@ -67,7 +79,7 @@ def cash_or_positions(args: dict | None = None) -> dict:
     return out
 
 
-TOOLS = [
+READ_TOOLS = [
     {
         "name": "exchange_status",
         "description": "Public Kalshi exchange status.",
@@ -108,8 +120,18 @@ HANDLERS = {
     "exchange_status": exchange_status,
     "list_markets": list_markets,
     "cash_or_positions": cash_or_positions,
+    "list_open_orders": list_open_orders,
+    **MUTATING_HANDLERS,
 }
 
 
+def registered_tools() -> list[dict]:
+    """Tools advertised on tools/list. Mutations appear only when safe mode is off."""
+    tools = [*READ_TOOLS, OPEN_ORDERS_TOOL]
+    if not safe_mode_enabled():
+        tools.extend(MUTATING_TOOLS)
+    return tools
+
+
 def main() -> None:
-    run_server("kalshi-readonly", __version__, TOOLS, HANDLERS)
+    run_server("kalshi-readonly", __version__, registered_tools, HANDLERS)
