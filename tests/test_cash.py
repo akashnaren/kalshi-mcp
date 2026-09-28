@@ -135,8 +135,10 @@ def test_cash_or_positions_signs_get_and_reports_official_fields(monkeypatch: py
     assert "fills" not in out
 
 
-def test_missing_auth_does_not_call_http(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_auth_does_not_call_http(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("KALSHI_API_KEY_ID", raising=False)
+    monkeypatch.delenv("KALSHI_API_KEY_ID_PATH", raising=False)
     monkeypatch.delenv("KALSHI_PRIVATE_KEY_PEM", raising=False)
     monkeypatch.delenv("KALSHI_PRIVATE_KEY_PATH", raising=False)
 

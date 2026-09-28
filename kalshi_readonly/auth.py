@@ -13,24 +13,71 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 DEFAULT_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 USER_AGENT = "tinkabot-kalshi-mcp/0.3"
-AUTH_ERROR = "auth required: set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH (or KALSHI_PRIVATE_KEY_PEM)"
+AUTH_ERROR = (
+    "auth required: set KALSHI_API_KEY_ID or KALSHI_API_KEY_ID_PATH "
+    "and KALSHI_PRIVATE_KEY_PATH (or KALSHI_PRIVATE_KEY_PEM). "
+    "Defaults: ~/.secrets/kalshi/key_id and ~/.secrets/kalshi/private.pem"
+)
 
 
 def api_base() -> str:
     return (os.environ.get("KALSHI_API_BASE") or DEFAULT_API_BASE).strip().rstrip("/")
 
 
+def _default_secret(name: str) -> Path:
+    return Path.home() / ".secrets" / "kalshi" / name
+
+
 _AUTH: tuple[str, str, str] | None = None
 _KEYS: dict[str, object] = {}
+
+
+def _clean_key_id(text: str) -> str:
+    key_id = text.strip()
+    if not key_id or len(key_id) > 256 or "PRIVATE KEY" in key_id or "-----BEGIN" in key_id:
+        return ""
+    return key_id
+
+
+def _read_key_file(path: Path) -> str:
+    try:
+        return _clean_key_id(path.read_text(encoding="utf-8"))
+    except OSError:
+        raise RuntimeError("unable to read KALSHI_API_KEY_ID_PATH") from None
+
+
+def _load_key_id() -> str:
+    direct = _clean_key_id(os.environ.get("KALSHI_API_KEY_ID") or "")
+    if direct:
+        return direct
+    path = (os.environ.get("KALSHI_API_KEY_ID_PATH") or "").strip()
+    if path:
+        return _read_key_file(Path(path))
+    default = _default_secret("key_id")
+    if not default.is_file():
+        return ""
+    try:
+        return _clean_key_id(default.read_text(encoding="utf-8"))
+    except OSError:
+        return ""
+
+
+def _pem_source() -> tuple[str, str]:
+    inline = os.environ.get("KALSHI_PRIVATE_KEY_PEM")
+    inline_pem = inline.strip() if inline and inline.strip() else ""
+    pem_path = (os.environ.get("KALSHI_PRIVATE_KEY_PATH") or "").strip()
+    if not pem_path and not inline_pem:
+        default = _default_secret("private.pem")
+        if default.is_file():
+            pem_path = str(default)
+    return inline_pem, pem_path
 
 
 def load_auth() -> tuple[str, str]:
     """Return the key id and PEM. Reuse them until the env or key file changes."""
     global _AUTH
-    key_id = (os.environ.get("KALSHI_API_KEY_ID") or "").strip()
-    inline = os.environ.get("KALSHI_PRIVATE_KEY_PEM")
-    pem_path = (os.environ.get("KALSHI_PRIVATE_KEY_PATH") or "").strip()
-    inline_pem = inline.strip() if inline and inline.strip() else ""
+    key_id = _load_key_id()
+    inline_pem, pem_path = _pem_source()
     token = ""
     if inline_pem:
         token = "inline:" + hashlib.sha256(inline_pem.encode("utf-8")).hexdigest()

@@ -78,7 +78,7 @@ class Options:
     max_price: Decimal = Decimal("0.50")
     max_risk: Decimal = Decimal("5")
     limit: int = 5
-    max_pages: int = 2
+    max_pages: int = 1
     page_size: int = 100
     min_price: Decimal = Decimal("0.02")
     price_ceiling: Decimal = Decimal("0.85")
@@ -164,7 +164,7 @@ def parse_options(args: dict) -> Options:
         max_price=_decimal_arg(args, "max_price", Decimal("0.50"), Decimal("0.05"), Decimal("0.84")),
         max_risk=_decimal_arg(args, "max_risk_dollars", Decimal("5"), Decimal("1"), Decimal("25")),
         limit=_int_arg(args, "limit", 5, 1, 10),
-        max_pages=_int_arg(args, "max_pages", 2, 1, 4),
+        max_pages=_int_arg(args, "max_pages", 1, 1, 4),
         page_size=_int_arg(args, "page_size", 100, 1, 200),
     )
 

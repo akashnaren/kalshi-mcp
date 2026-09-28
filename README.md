@@ -26,8 +26,9 @@ Copy `.env.example`. Portfolio and order calls need a key id and a private key. 
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `KALSHI_API_KEY_ID` | portfolio and trade calls | API key id |
-| `KALSHI_PRIVATE_KEY_PATH` | one of these | PEM file path |
+| `KALSHI_API_KEY_ID` | portfolio and trade calls | API key id. Or set `KALSHI_API_KEY_ID_PATH` |
+| `KALSHI_API_KEY_ID_PATH` | alternative to the key id | File containing the key id. If both id env vars are unset, `~/.secrets/kalshi/key_id` is used when that file exists |
+| `KALSHI_PRIVATE_KEY_PATH` | one of these | PEM file path. If PEM env vars are unset, `~/.secrets/kalshi/private.pem` is used when that file exists |
 | `KALSHI_PRIVATE_KEY_PEM` | one of these | PEM contents |
 | `KALSHI_API_BASE` | no | Default `https://api.elections.kalshi.com/trade-api/v2` |
 | `KALSHI_SAFE_MODE` | no | Defaults to on. See Trade. |
@@ -76,6 +77,13 @@ Set these in the host env, not on the command line:
 
 `KALSHI_SAFE_MODE=1` is the house default. Order tools stay unregistered. `find_best_bets` only reads. Do not commit the key file.
 
+Finance Engineer install, in order:
+
+1. `npm run build` so `dist/index.js` matches this tree.
+2. Point the host at `node /absolute/path/to/kalshi-mcp/dist/index.js` with `KALSHI_SAFE_MODE=0`.
+3. Restart the host. The Node process answers MCP `initialize` before the Python worker finishes `tools/list`, then `tools/list` waits for that list. The list is fixed for the life of the process (`listChanged` is false). A restart that leaves no live `dist/index.js` shows up as Not connected. Rebuild and restart so the host spawns the process again.
+4. Prove the new process with `tools/list`. It must include `fe_routine`, `find_best_bets`, `place_order`, `cancel_order`, `amend_order`, and `decrease_order`. stderr from the entry includes `safeMode=off` and those names. `exchange_status` is the cheap public call that the worker can reach Kalshi. It does not place.
+
 The Finance Engineer sleeve sets `KALSHI_SAFE_MODE=0` and restarts the host. `place_order`, `cancel_order`, `amend_order`, and `decrease_order` then show up. Every one of those calls still needs `confirm: true`. Opening risk still has to fit the caps: about $2 until Kalshi fill history shows the sleeve is profitable, hard max $15, at most 15% of the sleeve in one market, and at most 30% in one `corr_group`. There is no withdraw tool and no deposit tool. The daily and end-of-day prompt is `fe_routine` and `harness/fe-grok-bot-routine.md`.
 
 ```json
@@ -122,7 +130,7 @@ Use `"KALSHI_SAFE_MODE": "1"` when this host should stay read-only. `"0"` is onl
 | --- | --- |
 | `exchange_status` | Public exchange status |
 | `list_markets` | Public markets. Optional `limit` (default 5), `status`, `ticker` |
-| `find_best_bets` | Read-only rank. See Bets. Does not place orders. Rows include `edge_net_cents`, `flb_band`, `kelly_frac`, and `stake_mode` |
+| `find_best_bets` | Read-only rank. See Bets. Does not place orders. Rows include `edge_net_cents`, `flb_band`, `kelly_frac`, and `stake_mode`. `rate_limited` is true when a later scan page hit the retry budget |
 | `fe_routine` | Daily and end-of-day prompt for the Finance Engineer. Does not trade |
 | `cash_or_positions` | Cash and positions. `include`: `balance`, `cash`, `positions`, `both` (default), or `fills`. Optional `limit` (default 50) |
 | `list_open_orders` | Resting orders only (`status=resting`). Optional `ticker`, `limit` (default 100), `cursor`, `subaccount`. Read. No confirm |
@@ -153,11 +161,15 @@ Defaults, all overridable inside a fixed range:
 | `min_ask_size` | 1 | 0 to 100000 |
 | `min_hours_to_expiry` | 2 | 0 to 168 |
 | `max_hours_to_expiry` | 1440 (60 days) | above the minimum, up to 8760 |
-| `max_pages` | 2 | 1 to 4 |
+| `max_pages` | 1 | 1 to 4 |
 | `page_size` | 100 | 1 to 200 |
 | `limit` | 5 rows | 1 to 10 |
 
-Prices at or above 0.85 are never recommended. The scan also skips multivariate combos (`mve_filter=exclude`) so a page is not spent on them. A successful list is cached for about 45 seconds in the process. The Node entry keeps that process alive across tool calls.
+Prices at or above 0.85 are never recommended. The scan also skips multivariate combos (`mve_filter=exclude`) so a page is not spent on them. Public `GET /markets` counts against the same IP budget as signed calls, so the default scan is one page. A successful list is cached for about 5 minutes in the process. Concurrent scans of the same page share one in-flight request. The Node entry keeps that process alive across tool calls.
+
+`rate_limited` is false on a normal read. If a later scan page still gets HTTP 429 or 503 after the retry budget, the tool returns the pages already fetched, sets `rate_limited` to true, and does not place. That partial list is reused for about 60 seconds. A rate limit on the first page fails the tool with an error that starts with `rate_limited`. Do not scan again immediately.
+
+HTTP 429 and 503 are tried at most 3 times. A `Retry-After` value is honored up to 3 seconds. Without that header, or when it is not a delay or a date, the wait is a short exponential backoff with jitter (0.25s, then 0.5s, capped at 3 seconds). The error is `rate_limited` only after that budget is spent.
 
 Every response includes `places_orders: false` and the sentence `do not place until Akash names the trade`. Each ranked row also reports `edge_net_cents` after the fee dome (`ceil(0.07 * contracts * price * (1 - price))` cents), `flb_band`, `kelly_frac` of 0.25, and `stake_mode`. A price at or under 10 cents is skipped unless that net edge is at least 8 cents. The rank score itself is unchanged. The Finance Engineer routine is `fe_routine` and `harness/fe-grok-bot-routine.md`.
 

@@ -41,8 +41,12 @@ EOD: hold to settlement unless the named evidence flipped, then `decrease_order`
 
 ## Environment
 
-- `KALSHI_API_KEY_ID`
-- `KALSHI_PRIVATE_KEY_PATH` (PEM outside the repo)
+- `KALSHI_API_KEY_ID` or `KALSHI_API_KEY_ID_PATH` (default `~/.secrets/kalshi/key_id`)
+- `KALSHI_PRIVATE_KEY_PATH` or `KALSHI_PRIVATE_KEY_PEM` (default `~/.secrets/kalshi/private.pem`, outside the repo)
 - `KALSHI_SAFE_MODE=0` for this sleeve after install
+
+Restart checklist for the Node entry: `npm run build`, host command `node dist/index.js`, `KALSHI_SAFE_MODE=0`, restart the host. `tools/list` must include `fe_routine`, `place_order`, `cancel_order`, `amend_order`, and `decrease_order`. `exchange_status` is the cheap live check. Not connected means that process is not running. The tool list is fixed until the next restart.
+
+`find_best_bets` scans one page by default. If `rate_limited` is true, use the partial `research_queue` and do not scan again immediately. The score is unchanged and the tool still does not place.
 
 No secrets in the repo, the chat, or the order text.
