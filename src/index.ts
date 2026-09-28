@@ -4,7 +4,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 
-import { getBalance, getFills, getPositions } from "./portfolio.js";
+import { exchangeStatus, listMarkets } from "./markets.js";
+import { cashOrPositions, getBalance, getFills, getPositions } from "./portfolio.js";
 
 const limitField = z
   .number()
@@ -40,7 +41,7 @@ function toolError(err: unknown) {
 
 export function createServer(): McpServer {
   const server = new McpServer({
-    name: "kalshi",
+    name: "kalshi-readonly",
     version: "0.1.0",
   });
   registerTools(server);
@@ -49,11 +50,79 @@ export function createServer(): McpServer {
 
 function registerTools(server: McpServer): void {
   server.registerTool(
+    "exchange_status",
+    {
+      title: "Exchange status",
+      description: "Public Kalshi exchange status. Read-only.",
+      inputSchema: {},
+      annotations: readOnly,
+    },
+    async () => {
+      try {
+        return textResult(await exchangeStatus());
+      } catch (err) {
+        return toolError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_markets",
+    {
+      title: "List markets",
+      description: "List Kalshi markets (public). Read-only.",
+      inputSchema: {
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe("Page size from 1 to 200. Default 5."),
+        status: z.string().min(1).optional().describe("Market status filter."),
+        ticker: tickerField,
+      },
+      annotations: readOnly,
+    },
+    async ({ limit, status, ticker }) => {
+      try {
+        return textResult(await listMarkets({ limit, status, ticker }));
+      } catch (err) {
+        return toolError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "cash_or_positions",
+    {
+      title: "Cash or positions",
+      description:
+        "Read Kalshi cash and positions. include is balance, cash, positions, or both (default both). Returns official cash, balance_dollars, portfolio_value, and market plus event positions. Read-only; does not trade.",
+      inputSchema: {
+        include: z
+          .enum(["balance", "cash", "positions", "both"])
+          .optional()
+          .describe("balance, cash, positions, or both. Default both."),
+        limit: limitField,
+      },
+      annotations: readOnly,
+    },
+    async ({ include, limit }) => {
+      try {
+        return textResult(await cashOrPositions({ include, limit }));
+      } catch (err) {
+        return toolError(err);
+      }
+    },
+  );
+
+  server.registerTool(
     "get_balance",
     {
       title: "Get balance",
       description:
-        "Read the Kalshi portfolio cash balance in cents and dollars. Read-only; does not trade.",
+        "Read Kalshi cash in cents and dollars, plus portfolio_value when the API returns it. Read-only; does not trade.",
       inputSchema: {},
       annotations: readOnly,
     },
@@ -71,7 +140,7 @@ function registerTools(server: McpServer): void {
     {
       title: "Get positions",
       description:
-        "Read open Kalshi positions (non-zero contracts). Read-only; does not trade.",
+        "Read Kalshi market and event positions. Official ticker, quantity, and price fields only. Read-only; does not trade.",
       inputSchema: {
         limit: limitField,
         cursor: cursorField,
@@ -92,7 +161,8 @@ function registerTools(server: McpServer): void {
     "get_fills",
     {
       title: "Get fills",
-      description: "Read recent Kalshi fills. Read-only; does not trade.",
+      description:
+        "Read recent Kalshi fills (ticker, side, quantity, official prices). Read-only; does not trade.",
       inputSchema: {
         limit: limitField,
         cursor: cursorField,

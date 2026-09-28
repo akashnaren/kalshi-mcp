@@ -82,7 +82,7 @@ export function signedHeaders(
     "KALSHI-ACCESS-KEY": auth.keyId,
     "KALSHI-ACCESS-TIMESTAMP": timestamp,
     "KALSHI-ACCESS-SIGNATURE": signRequest(auth.privateKeyPem, timestamp, method, signPath),
-    "User-Agent": "kalshi-mcp/0.1",
+    "User-Agent": "tinkabot-kalshi-mcp/0.1",
     Accept: "application/json",
   };
 }

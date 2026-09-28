@@ -14,7 +14,15 @@ test("stdio server advertises only the read tools", async () => {
   try {
     const listed = await client.listTools();
     const names = listed.tools.map((tool) => tool.name).sort();
-    assert.deepEqual(names, ["get_balance", "get_fills", "get_positions"]);
+    assert.deepEqual(names, [
+      "cash_or_positions",
+      "exchange_status",
+      "get_balance",
+      "get_fills",
+      "get_positions",
+      "list_markets",
+    ]);
+    assert.equal(names.some((name) => /order|cancel|buy|sell|withdraw|deposit|trade/.test(name)), false);
     for (const tool of listed.tools) {
       assert.equal(tool.annotations?.readOnlyHint, true);
     }

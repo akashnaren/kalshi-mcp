@@ -11,6 +11,17 @@ export type GetOptions = {
   timeoutMs?: number;
 };
 
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
+
+export function clampLimit(limit: number | undefined, fallback = DEFAULT_LIMIT): number {
+  if (limit === undefined) return fallback;
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
+    throw new Error(`limit must be an integer from 1 to ${MAX_LIMIT}`);
+  }
+  return limit;
+}
+
 export function requestTarget(
   base: string,
   path: string,
@@ -42,16 +53,20 @@ function errorDetail(text: string): string {
   return "";
 }
 
-export async function kalshiGet(
+const PUBLIC_HEADERS = {
+  "User-Agent": "tinkabot-kalshi-mcp/0.1",
+  Accept: "application/json",
+};
+
+async function sendGet(
   path: string,
-  query?: Query,
-  opts: GetOptions = {},
+  query: Query | undefined,
+  opts: GetOptions,
+  headers: Record<string, string>,
 ): Promise<unknown> {
   assertReadOnly("GET");
   const base = (opts.base ?? apiBase()).replace(/\/+$/, "");
-  const auth = opts.auth ?? loadAuth();
   const { url, signPath } = requestTarget(base, path, query);
-  const headers = signedHeaders(auth, "GET", signPath, opts.nowMs);
   const fetchImpl = opts.fetchImpl ?? fetch;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), opts.timeoutMs ?? 20_000);
@@ -79,4 +94,25 @@ export async function kalshiGet(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export async function kalshiGet(
+  path: string,
+  query?: Query,
+  opts: GetOptions = {},
+): Promise<unknown> {
+  const base = (opts.base ?? apiBase()).replace(/\/+$/, "");
+  const auth = opts.auth ?? loadAuth();
+  const { signPath } = requestTarget(base, path, query);
+  const headers = signedHeaders(auth, "GET", signPath, opts.nowMs);
+  return sendGet(path, query, opts, headers);
+}
+
+/** Unsigned GET for public market data. No key material is attached. */
+export async function kalshiPublicGet(
+  path: string,
+  query?: Query,
+  opts: GetOptions = {},
+): Promise<unknown> {
+  return sendGet(path, query, opts, PUBLIC_HEADERS);
 }

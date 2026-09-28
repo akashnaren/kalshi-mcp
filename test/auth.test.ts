@@ -136,12 +136,16 @@ test("presentBalance exposes cents and dollars", () => {
       updated_ts: 10,
     }),
     {
+      balance: 12345,
       balance_cents: 12345,
       balance_dollars: "123.4500",
-      portfolio_value_cents: 500,
-      portfolio_value_dollars: "5.00",
+      cash: "123.4500",
+      portfolio_value: 500,
       updated_ts: 10,
     },
   );
-  assert.equal(presentBalance({ balance: 100 }).balance_dollars, "1.00");
+  const centsOnly = presentBalance({ balance: 100 });
+  assert.equal(centsOnly.balance_dollars, "1.00");
+  assert.equal(centsOnly.cash, "1.00");
+  assert.equal("portfolio_value" in centsOnly, false);
 });
