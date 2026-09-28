@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "kalshi-readonly": {
+      "command": "python3",
+      "args": ["${PLUGIN_ROOT}/server.py"],
+      "env": {
+        "KALSHI_API_KEY_ID": "${KALSHI_API_KEY_ID}",
+        "KALSHI_PRIVATE_KEY_PATH": "${KALSHI_PRIVATE_KEY_PATH}",
+        "KALSHI_PRIVATE_KEY_PEM": "${KALSHI_PRIVATE_KEY_PEM}"
+      }
+    }
+  }
+}
