@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from kalshi_readonly.recommend import FIND_BEST_TOOL, find_best_bets
 from kalshi_readonly.routine import FE_ROUTINE, fe_routine
 from kalshi_readonly.score import (
@@ -11,7 +13,10 @@ from kalshi_readonly.score import (
     edge_net_cents,
     fee_dome_cents,
     flb_band,
+    hold_to_res_default,
     maker_fee_cents,
+    parse_beliefs,
+    series_fees,
     taker_longshot_allowed,
 )
 
@@ -40,6 +45,7 @@ def _market(ticker: str, **overrides) -> dict:
 
 
 def test_fee_dome_and_band() -> None:
+    assert Decimal("0.07") * Decimal("0.25") * Decimal(100) == Decimal("1.75")
     assert fee_dome_cents(Decimal("0.50")) == Decimal(2)
     assert fee_dome_cents(Decimal("0.15")) == Decimal(1)
     assert flb_band(Decimal("0.08")) == "<10¢"
@@ -96,6 +102,11 @@ def test_ranked_row_carries_edge_net_and_quarter_kelly(monkeypatch) -> None:
     assert row["spread_cents"] == "1.00"
     assert row["depth_at_ask"] == "80.0000"
     assert row["fee_cents_est"] == "0"
+    assert row["m_taker"] == "1"
+    assert row["m_maker"] == "0"
+    assert row["fee_m_source"] == "default"
+    assert "take_profit" not in row
+    assert "tp_pct" not in row
     assert row["corr_group_hint"] == "city_weather_week"
     assert row["hold_to_res_default"] is False
     assert row["HOLD_TO_RES_DEFAULT"] is False
@@ -321,9 +332,116 @@ def test_series_multiplier_scales_taker_and_maker_fees(monkeypatch) -> None:
     by_ticker = {row["ticker"]: row for row in out["recommendations"]}
     assert by_ticker["M-MAKE"]["maker_flag"] is True
     assert by_ticker["M-MAKE"]["series_fee_multiplier"] == "2"
+    assert by_ticker["M-MAKE"]["fee_m_source"] == "payload"
+    assert by_ticker["M-MAKE"]["m_taker"] == "2"
+    assert by_ticker["M-MAKE"]["m_maker"] == "2"
     assert by_ticker["M-MAKE"]["fee_cents_est"] == "1"
     assert by_ticker["M-TAKE"]["maker_flag"] is False
     assert by_ticker["M-TAKE"]["side_exec"] == "taker"
     assert by_ticker["M-TAKE"]["fee_cents_est"] == "2"
     assert by_ticker["M-TAKE"]["spread_cents"] is None
     assert Decimal(by_ticker["M-TAKE"]["depth_at_ask"]) >= Decimal("3")
+
+
+def test_series_catalog_sets_split_maker_and_taker_m() -> None:
+    nfl = series_fees({"ticker": "KXNFLGAME-25SEP28KC", "series_ticker": "KXNFL"})
+    assert nfl == (Decimal(1), Decimal(1), "catalog")
+    assert series_fees({"ticker": "KXNFLGAME-1", "series_ticker": "KXHIGH"})[2] == "catalog"
+    assert series_fees({"ticker": "PLAIN", "series_ticker": "KXFEDDECISION"})[:2] == (Decimal(1), Decimal(1))
+    assert series_fees({"ticker": "KXNBAGAME-1"}) == (Decimal(1), Decimal(1), "catalog")
+    assert series_fees({"ticker": "KXMVE-1"}) == (Decimal(1), Decimal(2), "catalog")
+    assert series_fees({"ticker": "KXHIGHNY-26SEP28"}) == (Decimal(1), Decimal(0), "inference")
+    assert series_fees({"ticker": "KXBTCY-26"}) == (Decimal(0), Decimal(0), "catalog")
+    assert series_fees({"ticker": "KXETHY-26"}) == (Decimal(0), Decimal(0), "catalog")
+    assert series_fees({"ticker": "KXTEST"}) == (Decimal(1), Decimal(0), "default")
+    assert series_fees({"ticker": "KXNFLGAME-1", "fee_multiplier": "2"}) == (Decimal(2), Decimal(2), "payload")
+    assert hold_to_res_default(days=Decimal(7), net_cents=Decimal(1), fee_cents=Decimal(1)) is True
+    assert hold_to_res_default(days=Decimal(7), net_cents=Decimal(2), fee_cents=Decimal(1)) is False
+    assert hold_to_res_default(days=Decimal(8), net_cents=Decimal(1), fee_cents=Decimal(1)) is False
+    assert hold_to_res_default(days=Decimal(7), net_cents=Decimal(100), fee_cents=Decimal(1)) is False
+
+
+def test_catalog_fees_reach_ranked_rows_and_weather_gap_is_only_a_log(monkeypatch) -> None:
+    def fake_public_get(path: str, query=None):
+        return {
+            "markets": [
+                _market("KXNFLGAME-25SEP28KC"),
+                _market("KXHIGHNY-26SEP28"),
+                _market("KXBTCY-26", yes_bid_dollars="0"),
+                _market("PLAIN-TAKE", yes_bid_dollars="0"),
+            ],
+            "cursor": "",
+        }
+
+    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    out = find_best_bets(
+        {
+            "beliefs": [
+                {"ticker": "KXNFLGAME-25SEP28KC", "side": "yes", "confidence": 0.70, "evidence": "listed nfl maker"},
+                {
+                    "ticker": "KXHIGHNY-26SEP28",
+                    "side": "yes",
+                    "confidence": 0.70,
+                    "evidence": "weather gap is a log",
+                    "wx_gap_pp": 12,
+                },
+                {"ticker": "KXBTCY-26", "side": "yes", "confidence": 0.70, "evidence": "crypto year end is free"},
+                {"ticker": "PLAIN-TAKE", "side": "yes", "confidence": 0.70, "evidence": "unlisted taker still pays"},
+            ],
+            "limit": 10,
+        },
+        now=NOW,
+    )
+    by_ticker = {row["ticker"]: row for row in out["recommendations"]}
+    assert set(by_ticker) == {"KXNFLGAME-25SEP28KC", "KXHIGHNY-26SEP28", "KXBTCY-26", "PLAIN-TAKE"}
+    nfl = by_ticker["KXNFLGAME-25SEP28KC"]
+    assert nfl["side_exec"] == "maker"
+    assert nfl["fee_cents_est"] == "1"
+    assert nfl["m_maker"] == "1"
+    assert nfl["fee_m_source"] == "catalog"
+    assert "take_profit" not in nfl
+    weather = by_ticker["KXHIGHNY-26SEP28"]
+    assert weather["fee_cents_est"] == "0"
+    assert weather["fee_m_source"] == "inference"
+    assert weather["m_taker"] == "1"
+    assert weather["m_maker"] == "0"
+    assert weather["wx_gap_pp"] == "12"
+    assert "wx_gap_pp" not in nfl
+    crypto = by_ticker["KXBTCY-26"]
+    assert crypto["side_exec"] == "taker"
+    assert crypto["fee_cents_est"] == "0"
+    assert crypto["m_taker"] == "0"
+    assert crypto["fee_m_source"] == "catalog"
+    gap = Decimal(crypto["edge_net_cents"]) - Decimal(by_ticker["PLAIN-TAKE"]["edge_net_cents"])
+    assert gap == Decimal("1.00")
+    narrow = find_best_bets(
+        {
+            "beliefs": [{
+                "ticker": "KXHIGHNY-26SEP28",
+                "side": "yes",
+                "confidence": 0.70,
+                "evidence": "a three point gap still ranks",
+                "wx_gap_pp": 3,
+            }]
+        },
+        now=NOW,
+    )
+    assert narrow["recommendations"][0]["wx_gap_pp"] == "3"
+    assert narrow["counts"].get("skipped_flb", 0) == 0
+
+
+def test_belief_rejects_corr_group_none_and_a_non_numeric_weather_gap() -> None:
+    with pytest.raises(RuntimeError, match="corr_group must be a snake_case risk driver"):
+        parse_beliefs([{
+            "ticker": "KXHIGHNY-26SEP28",
+            "side": "yes",
+            "confidence": 0.7,
+            "corr_group": "none",
+        }])
+    with pytest.raises(RuntimeError, match="wx_gap_pp must be a number"):
+        parse_beliefs([{
+            "ticker": "KXHIGHNY-26SEP28",
+            "side": "yes",
+            "confidence": 0.7,
+            "wx_gap_pp": "wide",
+        }])

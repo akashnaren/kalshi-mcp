@@ -19,7 +19,7 @@ Fleet default is read-only: `KALSHI_SAFE_MODE=1`, so `tools/list` omits `place_o
 - A taker quote in the `<10¢` band is dropped unless `allow_longshot` is true, the probability edge is at least 0.08, and the suggested stake is forced to $2. `min_edge` is those probability points, not cents, and is separate from `edge_net_cents`.
 - Prices at or above 0.85 are never recommended. The default `max_price` is 0.84 (the hard ceiling) so a contract from 50¢ to 84¢ with edge is eligible. Pass a lower `max_price` to narrow the band. The old 0.50 default hid that band.
 - Lifetime volume of at least 1000 passes the floor. 24h `min_volume` (default 20) is the weaker proxy. Rows expose `volume_lifetime` and `volume_24h`.
-- Fee-blind evidence is skipped. A maker row whose taker fee is within 2 cents gets a tiny sort bump. The displayed score stays the formula.
+- Fee-blind evidence is skipped. Series M is looked up before `fee_cents_est` and `edge_net_cents`. A maker row whose taker fee is within 2 cents gets a tiny sort bump. The displayed score stays the formula. `hold_to_res_default` is true when days to resolution are at most 7 and the round-trip fee exceeds the remaining edge. There is no fixed take-profit percent.
 
 ## Caps
 
@@ -28,7 +28,7 @@ The order tools enforce these. Do not route around them.
 - About a **$2** default until Kalshi fill history shows the sleeve has been profitable.
 - **Hard max $15** per trade. A setting above $15 is ignored.
 - **15%** of the sleeve in one market. Never all-in.
-- **30%** of the sleeve in one `corr_group`. `place_order` and `amend_order` refuse opening risk when `corr_group` is missing.
+- **30%** of the sleeve in one `corr_group`. `place_order` and `amend_order` refuse opening risk when `corr_group` is missing, empty, or `none`. Mutually exclusive children share one group. Examples: `nfl_week_N`, `city_weather_YYYYMMDD`, `fed_meeting_YYYYMM`.
 - **$10** of new notional per UTC day.
 - Prices under 25 cents stay at $2 even after a winning history. At or above 50 cents, modest size can reach $8 once the sleeve is profitable, still inside the $15 ceiling.
 

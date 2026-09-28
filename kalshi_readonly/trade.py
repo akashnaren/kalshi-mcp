@@ -14,7 +14,7 @@ from decimal import Decimal
 from kalshi_readonly.caps import enforce_open, load_caps, note_open, opening_notional, summarize_book
 from kalshi_readonly.guard import require_mutation
 from kalshi_readonly.http import auth_call, auth_get
-from kalshi_readonly.score import fee_dome_cents
+from kalshi_readonly.score import fee_dome_cents, maker_fee_cents, series_fees
 
 _COUNT_RE = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d{1,2})?$")
 _PRICE_RE = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d{1,4})?$")
@@ -152,6 +152,8 @@ def _optional_group(args: dict) -> str | None:
     if "corr_group" not in args or args["corr_group"] in (None, ""):
         return None
     value = args["corr_group"]
+    if isinstance(value, str) and value.strip().lower() in {"none", "null"}:
+        return None
     if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_]{2,48}", value):
         raise RuntimeError("corr_group must be a snake_case risk driver")
     return value
@@ -190,6 +192,7 @@ def _guard_open(
 def _execution_echo(
     result: dict,
     *,
+    ticker: str,
     price: str,
     count: str,
     post_only: bool | None,
@@ -198,15 +201,26 @@ def _execution_echo(
 ) -> dict:
     """Fee and role for the proof log. day_spend_remaining comes from the book just loaded."""
     out = dict(result)
+    m_taker, m_maker, source = series_fees({"ticker": ticker})
     maker = post_only is True
     out["role"] = "maker" if maker else "taker"
+    out["m_taker"] = format(m_taker, "f")
+    out["m_maker"] = format(m_maker, "f")
+    out["fee_m_source"] = source
     if maker:
-        out["fee_cents_est"] = "0"
-        out["fee_note"] = "maker default M=0; the series multiplier is not on this request"
-    else:
-        fee = fee_dome_cents(Decimal(price), Decimal(count))
+        fee = maker_fee_cents(Decimal(price), Decimal(count), multiplier=m_maker)
         out["fee_cents_est"] = format(fee, "f")
-        out["fee_note"] = "taker ceil(0.07 * contracts * P * (1 - P) * 100) cents"
+        out["fee_note"] = (
+            "maker ceil(M_maker * 0.0175 * contracts * P * (1 - P) * 100) cents; "
+            f"M_maker={format(m_maker, 'f')} ({source})"
+        )
+    else:
+        fee = fee_dome_cents(Decimal(price), Decimal(count), multiplier=m_taker)
+        out["fee_cents_est"] = format(fee, "f")
+        out["fee_note"] = (
+            "taker ceil(M_taker * 0.07 * contracts * P * (1 - P) * 100) cents; "
+            f"M_taker={format(m_taker, 'f')} ({source})"
+        )
     if book is not None:
         caps = load_caps()
         daily = book.get("daily", Decimal(0))
@@ -299,6 +313,7 @@ def place_order(args: dict | None = None) -> dict:
         note_open(ticker=ticker, notional=notional, corr_group=corr_group, client_order_id=client_order_id)
     return _execution_echo(
         result,
+        ticker=ticker,
         price=price,
         count=count,
         post_only=post_only,
@@ -354,6 +369,7 @@ def amend_order(args: dict | None = None) -> dict:
     result = auth_call("POST", _order_path(order_id, "/amend"), _subaccount_query(args) or None, body)
     return _execution_echo(
         result,
+        ticker=str(body["ticker"]),
         price=str(body["price"]),
         count=str(body["count"]),
         post_only=None,
@@ -407,6 +423,7 @@ _MUTATION_NOTE = (
     "The server never sets confirm. "
     "Opening risk is capped at a $2 default, a $15 hard max, 15% of the sleeve in one market, "
     "and 30% in one corr_group. corr_group is required when the order opens risk. "
+    "Missing, empty, and none are refused. Mutually exclusive children share one group. "
     "Size above $2 needs a profitable fill history. "
     "Prices under 25 cents stay at $2. No withdraw or deposit."
 )
@@ -424,7 +441,8 @@ MUTATING_TOOLS = [
             "post_only with fill_or_kill or immediate_or_cancel is refused, and Kalshi rejects a post_only order that would cross. "
             "self_trade_prevention_type is taker_at_cross or maker. "
             "Pass client_order_id yourself if you need dedup. "
-            "A successful place echoes role (maker or taker), fee_cents_est, and day_spend_remaining from the live book. "
+            "A successful place echoes role (maker or taker), fee_cents_est from the series catalog on the ticker, "
+            "and day_spend_remaining from the live book. "
             + _MUTATION_NOTE
         ),
         "inputSchema": {
@@ -449,7 +467,13 @@ MUTATING_TOOLS = [
                 "exchange_index": {"type": "integer"},
                 "corr_group": {
                     "type": "string",
-                    "description": "Snake_case risk driver. Required on opening risk. Shares a 30% sleeve cap.",
+                    "description": (
+                        "Snake_case risk driver. Required on opening risk. "
+                        "Missing, empty, and none are refused. "
+                        "Mutually exclusive children of one parent share one group. "
+                        "Examples: nfl_week_N, city_weather_YYYYMMDD, fed_meeting_YYYYMM. "
+                        "Shares a 30% sleeve cap. A full co-resolution matrix is later."
+                    ),
                 },
                 "confirm": _CONFIRM,
             },
@@ -508,7 +532,12 @@ MUTATING_TOOLS = [
                 "subaccount": {"type": "integer"},
                 "corr_group": {
                     "type": "string",
-                    "description": "Snake_case risk driver. Required because an amend is checked as opening risk.",
+                    "description": (
+                        "Snake_case risk driver. Required because an amend is checked as opening risk. "
+                        "Missing, empty, and none are refused. "
+                        "Examples: nfl_week_N, city_weather_YYYYMMDD, fed_meeting_YYYYMM. "
+                        "Shares a 30% sleeve cap."
+                    ),
                 },
                 "confirm": _CONFIRM,
             },

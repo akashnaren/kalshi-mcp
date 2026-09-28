@@ -44,6 +44,7 @@ _KEEP = (
     "expected_expiration_time",
     "latest_expiration_time",
     "notional_value_dollars",
+    "series_ticker",
     "fee_multiplier",
     "series_fee_multiplier",
     "fee_multiplier_fp",

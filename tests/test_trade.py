@@ -487,6 +487,10 @@ def test_place_rejects_opening_risk_without_corr_group(monkeypatch: pytest.Monke
         place_order(args)
     with pytest.raises(RuntimeError, match="corr_group is required on opening risk"):
         amend_order({**_PLACE, "order_id": "ord-1", "corr_group": ""})
+    with pytest.raises(RuntimeError, match="corr_group is required on opening risk"):
+        place_order({**_PLACE, "corr_group": "none"})
+    with pytest.raises(RuntimeError, match="corr_group is required on opening risk"):
+        place_order({**_PLACE, "corr_group": "NONE"})
 
 
 def test_post_only_refuses_a_taker_time_in_force(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -520,4 +524,22 @@ def test_post_only_echoes_maker_role_and_zero_fee(monkeypatch: pytest.MonkeyPatc
     assert "corr_group" not in body
     assert out["role"] == "maker"
     assert out["fee_cents_est"] == "0"
+    assert out["fee_m_source"] == "default"
     assert out["day_spend_remaining"] == "9.58"
+
+
+def test_post_only_nfl_uses_catalog_maker_fee(monkeypatch: pytest.MonkeyPatch) -> None:
+    _auth(monkeypatch)
+    _enable_trading(monkeypatch)
+
+    def fake_open(req: urllib.request.Request, timeout: float = 20):
+        if req.get_method() == "GET":
+            return _empty_book()
+        return _Body({"order_id": "ord-1", "fill_count": "0.00", "remaining_count": "1.00"})
+
+    monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
+    out = place_order({**_PLACE, "ticker": "KXNFLGAME-25SEP28KC", "post_only": True, "corr_group": "nfl_week_4_2026"})
+    assert out["role"] == "maker"
+    assert out["fee_cents_est"] == "1"
+    assert out["m_maker"] == "1"
+    assert out["fee_m_source"] == "catalog"

@@ -173,10 +173,16 @@ FIND_BEST_TOOL = {
     "description": (
         "Read-only ranking of open Kalshi markets. "
         "Score is estimated_confidence times payout_ratio divided by stake_needed. "
-        "Each row reports fee_cents_est (taker M*0.07 or maker M*0.0175; unknown series M is taker 1 and maker 0), "
-        "edge_net_cents after that taker dome and a depth haircut, flb_band, kelly_frac 0.25, stake_mode, "
+        "Each row reports fee_cents_est after a series lookup "
+        "(taker ceil(M_taker*0.07*C*P*(1-P)), maker ceil(M_maker*0.0175*C*P*(1-P)); "
+        "NFL, MLB, Fed, and CPI are usually 1/1, weather is often 1/0 by inference, "
+        "some crypto year-end is 0/0, and an unlisted series is taker 1 and maker 0). "
+        "A payload fee_multiplier overrides both sides. "
+        "edge_net_cents is after that taker dome and a depth haircut, then flb_band, kelly_frac 0.25, stake_mode, "
         "maker_flag and side_exec (SIDE_EXEC), spread_cents, depth_at_ask, "
         "days_to_res (DAYS_TO_RES), corr_group_hint, and hold_to_res_default (HOLD_TO_RES_DEFAULT). "
+        "hold_to_res_default is true when days to resolution are at most 7 and the round-trip fee "
+        "exceeds the remaining edge. There is no settlement fee and no fixed take-profit percent. "
         "min_edge is probability points, default 0.08, and is separate from edge_net_cents. "
         "max_price defaults to 0.84, the hard ceiling, so a 50 to 84 cent contract with edge stays eligible. "
         "Pass a lower max_price to narrow the band. "
@@ -205,7 +211,20 @@ FIND_BEST_TOOL = {
                             "type": "boolean",
                             "description": "Keep a taker quote in the <10¢ band. Requires edge at least 0.08 and forces a $2 stake.",
                         },
-                        "corr_group": {"type": "string"},
+                        "corr_group": {
+                            "type": "string",
+                            "description": (
+                                "Snake_case risk driver. Mutually exclusive children share one group. "
+                                "Examples: nfl_week_N, city_weather_YYYYMMDD, fed_meeting_YYYYMM. none is refused."
+                            ),
+                        },
+                        "wx_gap_pp": {
+                            "type": "number",
+                            "description": (
+                                "Optional log of a named weather model gap in probability points. "
+                                "Not an entry gate."
+                            ),
+                        },
                     },
                     "required": ["ticker", "side", "confidence"],
                 },
