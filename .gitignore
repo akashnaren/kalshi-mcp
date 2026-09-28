@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+id_rsa*
+secrets/
+.secrets/
