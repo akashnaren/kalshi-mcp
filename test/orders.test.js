@@ -71,20 +71,20 @@ test("place refuses size over the caps and still records what it sent", async ()
   const env = { KALSHI_SAFE_MODE: "0" };
   await assert.rejects(() => placeOrder({
     client, env, ledger, confirm: true, ticker: "KXTEST-26-T1", side: "bid", count: 20, price: 0.5,
-  }), /per idea/);
+  }), /profitable/);
   assert.equal(calls.length, 0);
 
   await placeOrder({
-    client, env, ledger, confirm: true, ticker: "KXTEST-26-T1", side: "bid", count: 10, price: 0.2,
+    client, env, ledger, confirm: true, ticker: "KXTEST-26-T1", side: "bid", count: 5, price: 0.2,
   });
   await placeOrder({
-    client, env, ledger, confirm: true, ticker: "KXTEST-26-T2", side: "bid", count: 10, price: 0.2,
+    client, env, ledger, confirm: true, ticker: "KXTEST-26-T2", side: "bid", count: 5, price: 0.2,
   });
   await assert.rejects(() => placeOrder({
-    client, env, ledger, confirm: true, ticker: "KXTEST-26-T3", side: "bid", count: 40, price: 0.2,
+    client, env, ledger, confirm: true, ticker: "KXTEST-26-T3", side: "bid", count: 50, price: 0.2,
   }), /daily/);
   assert.equal(calls.length, 2);
-  assert.equal(ledger.snapshot().daily, 4);
+  assert.equal(ledger.snapshot().daily, 2);
 });
 
 test("parallel orders cannot slip past the daily cap", async () => {
@@ -99,7 +99,7 @@ test("parallel orders cannot slip past the daily cap", async () => {
     },
   };
   const env = { KALSHI_SAFE_MODE: "0" };
-  const results = await Promise.allSettled([0, 1, 2, 3, 4, 5].map((i) => placeOrder({
+  const results = await Promise.allSettled([...Array(11).keys()].map((i) => placeOrder({
     client,
     env,
     ledger,
@@ -107,12 +107,12 @@ test("parallel orders cannot slip past the daily cap", async () => {
     confirm: true,
     ticker: `KXPAR-${i}`,
     side: "bid",
-    count: 10,
+    count: 5,
     price: 0.2,
   })));
   const placed = results.filter((result) => result.status === "fulfilled");
-  assert.equal(placed.length, 5);
-  assert.equal(calls.length, 5);
+  assert.equal(placed.length, 10);
+  assert.equal(calls.length, 10);
   assert.equal(ledger.snapshot().daily, 10);
 });
 
@@ -143,7 +143,7 @@ test("exit closes a long even when the daily cap is full", async () => {
   assert.equal(ledger.snapshot().daily, 10);
 });
 
-test("amend cannot grow an idea past $2, decrease can shrink it", async () => {
+test("amend cannot grow past the small default until the sleeve has won, decrease can shrink", async () => {
   const calls = [];
   const resting = {
     order_id: "abc12345",
@@ -177,14 +177,15 @@ test("amend cannot grow an idea past $2, decrease can shrink it", async () => {
   };
   const env = { KALSHI_SAFE_MODE: "0" };
   await assert.rejects(() => amendOrder({
-    client, env, confirm: true, orderId: "abc12345", ticker: "KXTEST-26-T1", side: "bid", price: 0.1, count: 30,
-  }), /per idea/);
+    client, env, confirm: true, orderId: "abc12345", ticker: "KXTEST-26-T1", side: "bid", price: 0.1, count: 20,
+  }), /profitable/);
   assert.equal(calls.length, 0);
 
   const amended = await amendOrder({
-    client, env, confirm: true, orderId: "abc12345", ticker: "KXTEST-26-T1", side: "bid", price: 0.1, count: 20,
+    client, env, confirm: true, orderId: "abc12345", ticker: "KXTEST-26-T1", side: "bid", price: 0.1, count: 8,
   });
   assert.equal(amended.amended, true);
+  assert.equal(amended.delta < 0, true);
   assert.equal(calls[0][0], "amend");
 
   await decreaseOrder({
@@ -192,4 +193,75 @@ test("amend cannot grow an idea past $2, decrease can shrink it", async () => {
   });
   assert.equal(calls[1][0], "decrease");
   assert.equal(calls[1][2].reduce_by, "2.00");
+});
+
+test("a profitable sleeve can size up, and nothing clears the hard max", async () => {
+  const calls = [];
+  const resting = {
+    order_id: "abc12345",
+    ticker: "KXTEST-26-T1",
+    status: "resting",
+    action: "buy",
+    side: "yes",
+    remaining_count_fp: "10.00",
+    yes_price_dollars: "0.1000",
+    client_order_id: "cid-1",
+    created_time: new Date().toISOString(),
+  };
+  const client = {
+    async getPositions() {
+      return {
+        market_positions: [{
+          ticker: "OLD",
+          position_fp: "0",
+          realized_pnl_dollars: "4.00",
+          fees_paid_dollars: "0.20",
+          market_exposure_dollars: "0",
+        }],
+      };
+    },
+    async getFills() {
+      return {
+        fills: [0, 1, 2].map((i) => ({
+          action: "sell",
+          ticker: "OLD",
+          count_fp: "1.00",
+          yes_price_dollars: "0.4000",
+          created_time: "2020-01-02T00:00:00Z",
+          trade_id: `old-${i}`,
+        })),
+      };
+    },
+    async getOrders() {
+      return { orders: [resting] };
+    },
+    async createOrder(body) {
+      calls.push(body);
+      return { order_id: "def67890" };
+    },
+    async amendOrder(orderId, body) {
+      calls.push(["amend", orderId, body]);
+      return { order_id: orderId };
+    },
+  };
+  const env = {
+    KALSHI_SAFE_MODE: "0",
+    KALSHI_SLEEVE_DOLLARS: "200",
+    KALSHI_MAX_DAILY_NOTIONAL: "20",
+    KALSHI_MAX_DOLLARS_PER_TRADE: "100",
+  };
+  await assert.rejects(() => placeOrder({
+    client, env, confirm: true, ticker: "KXNEW-1", side: "bid", count: 20, price: 0.8,
+  }), /hard max/);
+  const placed = await placeOrder({
+    client, env, confirm: true, ticker: "KXNEW-1", side: "bid", count: 100, price: 0.15,
+  });
+  assert.equal(placed.notional, 15);
+  assert.equal(calls[0].count, "100.00");
+
+  const grown = await amendOrder({
+    client, env, confirm: true, orderId: "abc12345", ticker: "KXTEST-26-T1", side: "bid", price: 0.1, count: 20,
+  });
+  assert.equal(grown.amended, true);
+  assert.equal(grown.delta, 1);
 });

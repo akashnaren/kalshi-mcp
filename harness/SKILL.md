@@ -26,12 +26,13 @@ Prefer a **small stake** and a **high payout** when named indicators are strong.
 
 The server enforces these. Do not route around them.
 
-- **$2** per idea.
+- Start at the **$1 default**. Size changes with the situation: signals, liquidity, and edge. It is not one fixed number.
+- **Hard max $15** per trade. That is a ceiling, not the target. A setting above $15 is ignored.
+- Only increase size above the $1 default when past Kalshi fill history shows the sleeve has been **profitable**.
 - **15%** of the sleeve in one market. Never all-in.
-- **$10** of new notional per UTC day.
-- Likely favorites are sized at half the $2 idea cap.
+- **$10** of new notional per UTC day. Under the defaults this binds before the $15 ceiling.
 
-Env overrides: `KALSHI_SLEEVE_DOLLARS`, `KALSHI_MAX_DOLLARS_PER_IDEA`, `KALSHI_MAX_SLEEVE_FRACTION`, `KALSHI_MAX_DAILY_NOTIONAL`. Leave the defaults unless Akash changes them.
+Env overrides: `KALSHI_SLEEVE_DOLLARS`, `KALSHI_DEFAULT_DOLLARS_PER_TRADE`, `KALSHI_MAX_DOLLARS_PER_TRADE` (cannot exceed 15), `KALSHI_MAX_SLEEVE_FRACTION`, `KALSHI_MAX_DAILY_NOTIONAL`. Leave the defaults unless Akash changes them.
 
 ## Install
 
@@ -45,8 +46,8 @@ There is no withdraw tool and no deposit tool.
 
 1. `get_balance`, `get_positions`, `get_fills`, `get_orders`.
 2. Write signals: `key`, `side`, `confidence`, `detail`, and a ticker scope.
-3. `find_best_bets`. Read `lane`, `keys`, `stake`, `payout`, `score`, `suggested_dollars`, `suggested_contracts`.
-4. `place_order` with `confirm:true` for rows that have a suggested size, in rank order. Stop on `CAP`.
+3. `find_best_bets`. Read `lane`, `keys`, `stake`, `payout`, `score`, `suggested_dollars`, `suggested_contracts`, and `win_history`.
+4. `place_order` with `confirm:true` for rows that have a suggested size, in rank order. Stop on `CAP`. Do not split one idea to dodge the hard max $15 or the win-history gate.
 5. Show what you placed and what you skipped.
 
 ## EOD

@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { checkBuyCaps, loadCaps, loadRiskBook, openingNotional, orderNotional, signedContracts } from "./caps.js";
+import { checkBuyCaps, loadCaps, loadRiskBook, openingNotional, orderNotional, signedContracts, tradeSizeReasons } from "./caps.js";
 import { assertCanMutate, PolicyError, round4 } from "./policy.js";
 
 const ORDER_ID_RE = /^[A-Za-z0-9-]{8,80}$/;
@@ -40,12 +40,14 @@ async function bookOrRefuse(client, ledger) {
   }
 }
 
-function enforceCaps({ notional, ticker, book, caps }) {
+function enforceCaps({ notional, ticker, book, caps, history, checkSize = true }) {
   const verdict = checkBuyCaps({
     notional,
     marketExposure: book.byTicker[ticker] || 0,
     dailyNotional: book.daily,
     caps,
+    history: history ?? book.history,
+    checkSize,
   });
   if (!verdict.ok) {
     throw new PolicyError("CAP", verdict.reasons.join("; "));
@@ -75,7 +77,9 @@ export async function placeOrder({
       price,
       positionContracts: book.contractsByTicker[ticker] || 0,
     });
-    const verdict = notional > 0 ? enforceCaps({ notional, ticker, book, caps }) : { ok: true, notional: 0 };
+    const verdict = notional > 0
+      ? enforceCaps({ notional, ticker, book, caps, history: book.history })
+      : { ok: true, notional: 0 };
     const body = buildCreateOrderBody({
       ticker,
       side,
@@ -206,12 +210,11 @@ async function amendOrderLocked({ client, env, ledger, orderId, ticker, side, pr
     ? round4(newRemaining * round4(1 - Number(price)))
     : round4(newRemaining * Number(price));
   const delta = round4(newNotional - oldNotional);
-  if (newNotional > caps.max_dollars_per_idea) {
-    throw new PolicyError("CAP", `amended idea $${newNotional} exceeds $${caps.max_dollars_per_idea} per idea`);
-  }
   if (delta > 0) {
     const book = await bookOrRefuse(client, ledger);
-    enforceCaps({ notional: delta, ticker, book, caps });
+    const sizeReasons = tradeSizeReasons(newNotional, caps, book.history);
+    if (sizeReasons.length) throw new PolicyError("CAP", sizeReasons.join("; "));
+    enforceCaps({ notional: delta, ticker, book, caps, checkSize: false });
   }
   const updatedId = crypto.randomUUID();
   if (ledger && delta > 0) {

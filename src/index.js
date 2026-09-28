@@ -15,6 +15,6 @@ const client = new KalshiClient({
 const server = createServer({ client, env: process.env });
 
 process.stderr.write(
-  `kalshi-mcp stdio ready safe_mode=${config.safeMode ? "on" : "off"} sleeve=${caps.sleeve_dollars} max_idea=${caps.max_dollars_per_idea} daily=${caps.max_daily_notional}\n`,
+  `kalshi-mcp stdio ready safe_mode=${config.safeMode ? "on" : "off"} sleeve=${caps.sleeve_dollars} default_trade=${caps.default_dollars_per_trade} max_trade=${caps.max_dollars_per_trade} daily=${caps.max_daily_notional}\n`,
 );
 await server.connect(new StdioServerTransport());

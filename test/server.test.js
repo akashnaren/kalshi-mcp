@@ -85,7 +85,8 @@ test("tool list is read-heavy and find_best_bets returns named keys", async () =
     assert.equal(payload.policy.auto_trade, true);
     assert.equal(payload.policy.scan_places_orders, false);
     assert.equal(payload.recommendations[0].lane, "asymmetric");
-    assert.ok(payload.recommendations[0].suggested_dollars <= 2);
+    assert.equal(payload.win_history.allows_scale, false);
+    assert.ok(payload.recommendations[0].suggested_dollars <= 1);
     const balance = await client.callTool({ name: "get_balance", arguments: {} });
     assert.equal(JSON.parse(balance.content[0].text).balance, 2500);
     assert.equal(kalshi.calls.includes("create"), false);
@@ -135,7 +136,7 @@ test("live sleeve rejects an oversized order and still exits", async () => {
 
     const placed = await client.callTool({
       name: "place_order",
-      arguments: { confirm: true, ticker: "KXOTHER-1", side: "bid", count: 4, price: 0.5 },
+      arguments: { confirm: true, ticker: "KXOTHER-1", side: "bid", count: 2, price: 0.5 },
     });
     assert.equal(placed.isError, undefined);
     const review = await client.callTool({

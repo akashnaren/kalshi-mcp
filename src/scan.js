@@ -1,4 +1,4 @@
-import { loadCaps, loadRiskBook, marketCapDollars, sizeIdeas } from "./caps.js";
+import { closedHistory, loadCaps, loadRiskBook, marketCapDollars, sizeIdeas } from "./caps.js";
 import { planMarketQueries, policySummary, rankMarkets, resolveFilters, validateSignals } from "./policy.js";
 
 /**
@@ -18,17 +18,19 @@ export async function findBestBets({ client, signals, options = {}, caps, ledger
     caps: activeCaps,
     marketExposure: book.marketExposure,
     dailyNotional: book.dailyNotional,
+    history: book.history,
   });
   return {
     policy: policySummary(filters),
     caps: {
       sleeve_dollars: activeCaps.sleeve_dollars,
-      max_dollars_per_idea: activeCaps.max_dollars_per_idea,
+      default_dollars_per_trade: activeCaps.default_dollars_per_trade,
+      max_dollars_per_trade: activeCaps.max_dollars_per_trade,
       max_sleeve_fraction: activeCaps.max_sleeve_fraction,
       max_daily_notional: activeCaps.max_daily_notional,
       market_cap: marketCapDollars(activeCaps),
-      likely_size_fraction: activeCaps.likely_size_fraction,
     },
+    win_history: book.history,
     filters: {
       min_confidence: filters.min_confidence,
       min_volume_24h: filters.min_volume_24h,
@@ -54,16 +56,23 @@ async function suggestionBook(client, ledger, options, now) {
     return {
       marketExposure: options.market_exposure ?? {},
       dailyNotional: Number(options.daily_notional) || 0,
+      history: closedHistory(),
       book_error: null,
     };
   }
   try {
     const book = await loadRiskBook(client, ledger, now);
-    return { marketExposure: book.byTicker, dailyNotional: book.daily, book_error: null };
+    return {
+      marketExposure: book.byTicker,
+      dailyNotional: book.daily,
+      history: book.history,
+      book_error: null,
+    };
   } catch (err) {
     return {
       marketExposure: options.market_exposure ?? {},
       dailyNotional: Number(options.daily_notional) || 0,
+      history: closedHistory(),
       book_error: err.message,
     };
   }

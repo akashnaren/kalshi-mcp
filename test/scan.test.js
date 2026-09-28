@@ -47,7 +47,8 @@ test("scan pages only up to the cap and ranks the liquid cheap side", async () =
   assert.equal(result.policy.auto_trade, true);
   assert.equal(result.policy.scan_places_orders, false);
   assert.equal(result.recommendations[0].lane, "asymmetric");
-  assert.ok(result.recommendations[0].suggested_dollars <= 2);
+  assert.equal(result.win_history.allows_scale, false);
+  assert.ok(result.recommendations[0].suggested_dollars <= 1);
   assert.ok(result.recommendations[0].suggested_dollars > 0);
   assert.equal(result.policy.score, "confidence * payout / stake");
   assert.equal(result.recommendations[0].keys[0], "nhc_cone_includes_city");
@@ -82,4 +83,52 @@ test("series scope is one query, not one query per market", async () => {
   assert.equal(calls[0].series_ticker, "KXFED");
   assert.deepEqual(result.recommendations.map((row) => row.ticker), ["KXFED-26DEC-T1"]);
   assert.equal(result.skipped.no_signal, 1);
+});
+
+test("find_best_bets scales only from live winning history", async () => {
+  const markets = { markets: [market()], cursor: "" };
+  const won = {
+    async getMarkets() {
+      return markets;
+    },
+    async getPositions() {
+      return {
+        market_positions: [{
+          ticker: "OLD",
+          realized_pnl_dollars: "4.00",
+          fees_paid_dollars: "0.10",
+          position_fp: "0",
+          market_exposure_dollars: "0",
+        }],
+      };
+    },
+    async getFills() {
+      return {
+        fills: [0, 1, 2].map((i) => ({
+          action: "sell",
+          created_time: "2020-01-01T00:00:00Z",
+          count_fp: "1.00",
+          yes_price_dollars: "0.4000",
+          trade_id: `old-${i}`,
+        })),
+      };
+    },
+  };
+  const hot = await findBestBets({ client: won, signals: [signal()] });
+  assert.equal(hot.win_history.allows_scale, true);
+  assert.ok(hot.recommendations[0].suggested_dollars > 1);
+  assert.ok(hot.recommendations[0].suggested_dollars <= 10);
+
+  const broken = {
+    async getMarkets() {
+      return markets;
+    },
+    async getPositions() {
+      throw new Error("book down");
+    },
+  };
+  const cold = await findBestBets({ client: broken, signals: [signal()] });
+  assert.equal(cold.win_history.allows_scale, false);
+  assert.match(cold.book_error, /book down/);
+  assert.ok(cold.recommendations[0].suggested_dollars <= 1);
 });

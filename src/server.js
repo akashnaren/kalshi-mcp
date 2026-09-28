@@ -30,7 +30,7 @@ function failure(err) {
 export function createServer({ client, env = process.env, ledger = createLedger(), lock = createLock() }) {
   const server = new McpServer({
     name: "kalshi-mcp",
-    version: "1.1.0",
+    version: "1.2.0",
   });
   const mutate = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
   const read = { readOnlyHint: true, destructiveHint: false, openWorldHint: true };
@@ -102,7 +102,7 @@ export function createServer({ client, env = process.env, ledger = createLedger(
 
   server.registerTool("find_best_bets", {
     title: "Find best bets",
-    description: "Read-only scan. Prefers small stake and high payout when named indicators are strong (confidence at least 0.65 and ask at most $0.40). Score = confidence * payout / stake. Also returns a modest size on a highly likely side (confidence at least 0.85). Suggests contract counts inside the sleeve caps. Does not place orders.",
+    description: "Read-only scan. Prefers small stake and high payout when named indicators are strong (confidence at least 0.65 and ask at most $0.40). Score = confidence * payout / stake. Also returns a modest size on a highly likely side (confidence at least 0.85). Suggests the $1 default unless fill history shows the sleeve is profitable, then sizes up toward the hard max $15 by signals, liquidity, and edge. Still inside 15% of the sleeve and $10 per day. Does not place orders.",
     annotations: read,
     inputSchema: {
       signals: z.array(signalSchema).min(1).max(40),
@@ -159,7 +159,7 @@ export function createServer({ client, env = process.env, ledger = createLedger(
 
   server.registerTool("place_order", {
     title: "Place order",
-    description: "Place a limit order. Refused while KALSHI_SAFE_MODE is on. Refused unless confirm is true. Refused when the order breaks the sleeve caps: $2 per idea, 15% of the sleeve in one market, $10 new notional per UTC day. bid buys YES. ask sells YES. There is no withdraw or deposit tool.",
+    description: "Place a limit order. Refused while KALSHI_SAFE_MODE is on. Refused unless confirm is true. Default size is $1. Hard max is $15 per trade. Larger size is refused until Kalshi fill history shows the sleeve is profitable. Also refused above 15% of the sleeve in one market or $10 new notional per UTC day. bid buys YES. ask sells YES. There is no withdraw or deposit tool.",
     annotations: mutate,
     inputSchema: {
       confirm: confirmField,
@@ -265,7 +265,7 @@ export function createServer({ client, env = process.env, ledger = createLedger(
 
   server.registerTool("amend_order", {
     title: "Amend order",
-    description: "Change price or size of a resting order. Refused unless safe mode is off and confirm is true. A size increase is cap-checked. The resting order must be visible so the increase can be measured.",
+    description: "Change price or size of a resting order. Refused unless safe mode is off and confirm is true. A size increase is cap-checked against the $1 default, the hard max $15, and the win-history gate. The resting order must be visible so the increase can be measured.",
     annotations: mutate,
     inputSchema: {
       confirm: confirmField,

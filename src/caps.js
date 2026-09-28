@@ -1,11 +1,14 @@
 import { PolicyError, parseCount, parseDollars, round4 } from "./policy.js";
 
+export const HARD_TRADE_CEILING = 15;
+export const MIN_CLOSED_TRADES = 3;
+
 export const CAP_DEFAULTS = Object.freeze({
   sleeve_dollars: 71,
-  max_dollars_per_idea: 2,
+  default_dollars_per_trade: 1,
+  max_dollars_per_trade: HARD_TRADE_CEILING,
   max_sleeve_fraction: 0.15,
   max_daily_notional: 10,
-  likely_size_fraction: 0.5,
   take_profit_return: 0.5,
   cut_loss_return: -0.4,
 });
@@ -23,12 +26,27 @@ function readNumber(env, key, fallback, min, max) {
 }
 
 export function loadCaps(env = process.env) {
+  const maxTrade = readNumber(
+    env,
+    "KALSHI_MAX_DOLLARS_PER_TRADE",
+    CAP_DEFAULTS.max_dollars_per_trade,
+    0.01,
+    HARD_TRADE_CEILING,
+  );
+  let defaultTrade = readNumber(
+    env,
+    "KALSHI_DEFAULT_DOLLARS_PER_TRADE",
+    CAP_DEFAULTS.default_dollars_per_trade,
+    0.01,
+    HARD_TRADE_CEILING,
+  );
+  if (defaultTrade > maxTrade) defaultTrade = maxTrade;
   return {
     sleeve_dollars: readNumber(env, "KALSHI_SLEEVE_DOLLARS", CAP_DEFAULTS.sleeve_dollars, 1, 1_000_000),
-    max_dollars_per_idea: readNumber(env, "KALSHI_MAX_DOLLARS_PER_IDEA", CAP_DEFAULTS.max_dollars_per_idea, 0.01, 1_000_000),
+    default_dollars_per_trade: defaultTrade,
+    max_dollars_per_trade: maxTrade,
     max_sleeve_fraction: readNumber(env, "KALSHI_MAX_SLEEVE_FRACTION", CAP_DEFAULTS.max_sleeve_fraction, 0.01, 1),
     max_daily_notional: readNumber(env, "KALSHI_MAX_DAILY_NOTIONAL", CAP_DEFAULTS.max_daily_notional, 0.01, 1_000_000),
-    likely_size_fraction: readNumber(env, "KALSHI_LIKELY_SIZE_FRACTION", CAP_DEFAULTS.likely_size_fraction, 0.05, 1),
     take_profit_return: readNumber(env, "KALSHI_TAKE_PROFIT_RETURN", CAP_DEFAULTS.take_profit_return, 0.01, 10),
     cut_loss_return: readNumber(env, "KALSHI_CUT_LOSS_RETURN", CAP_DEFAULTS.cut_loss_return, -0.99, -0.01),
   };
@@ -36,6 +54,66 @@ export function loadCaps(env = process.env) {
 
 export function marketCapDollars(caps) {
   return round4(caps.sleeve_dollars * caps.max_sleeve_fraction);
+}
+
+function clamp01(value) {
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+}
+
+export function tradeCeiling(caps) {
+  const configured = Number(caps?.max_dollars_per_trade);
+  const raw = Number.isFinite(configured) ? configured : HARD_TRADE_CEILING;
+  return round4(Math.min(HARD_TRADE_CEILING, Math.max(0, raw)));
+}
+
+/**
+ * Size weight in [0, 1] from the idea itself. Same inputs always return the
+ * same weight: signals, liquidity, and edge. No random draw.
+ */
+export function situationFactor(idea = {}) {
+  const confidence = Number(idea.confidence);
+  const known = Number.isFinite(confidence) ? confidence : 0;
+  const signal = clamp01((known - 0.65) / 0.35);
+  const keyCount = Array.isArray(idea.keys) ? idea.keys.length : 1;
+  const extraKeys = clamp01((keyCount - 1) / 2);
+  const spread = idea.liquidity?.spread;
+  const top = idea.liquidity?.top_size;
+  const spreadScore = spread == null || spread === "" ? 0.5 : clamp01(1 - Number(spread) / 0.08);
+  const sizeScore = top == null || top === "" ? 0.5 : clamp01((Number(top) - 10) / 90);
+  const liquidity = 0.5 * spreadScore + 0.5 * sizeScore;
+  let edge = 0;
+  if (idea.lane === "asymmetric") edge = clamp01(((Number(idea.payout_to_stake) || 0) - 1) / 4);
+  else if (idea.lane === "likely") edge = clamp01((known - 0.85) / 0.15);
+  return round4(0.35 * signal + 0.15 * extraKeys + 0.25 * liquidity + 0.25 * edge);
+}
+
+export function scaledBudget(caps, history, factor = 1) {
+  const ceiling = tradeCeiling(caps);
+  const base = Math.min(Number(caps.default_dollars_per_trade) || 0, ceiling);
+  if (!history?.allows_scale) return round4(base);
+  return round4(base + (ceiling - base) * clamp01(Number(factor)));
+}
+
+export function tradeSizeReasons(amount, caps, history) {
+  const sized = round4(amount);
+  const ceiling = tradeCeiling(caps);
+  const allowed = scaledBudget(caps, history, 1);
+  const reasons = [];
+  if (sized > HARD_TRADE_CEILING) {
+    reasons.push(`hard max $${HARD_TRADE_CEILING} per trade`);
+  } else if (sized > ceiling) {
+    reasons.push(`trade ceiling is $${ceiling}`);
+  } else if (sized > allowed) {
+    reasons.push(`size stays at the $${round4(baseDefault(caps))} default until fill history shows the sleeve is profitable`);
+  }
+  return reasons;
+}
+
+function baseDefault(caps) {
+  return Math.min(Number(caps.default_dollars_per_trade) || 0, tradeCeiling(caps));
 }
 
 export function createLock() {
@@ -96,16 +174,21 @@ export function openingNotional({ side, count, price, positionContracts = 0 }) {
   throw new PolicyError("BAD_ORDER", "side must be bid or ask.");
 }
 
-export function checkBuyCaps({ notional, marketExposure = 0, dailyNotional = 0, caps }) {
+export function checkBuyCaps({
+  notional,
+  marketExposure = 0,
+  dailyNotional = 0,
+  caps,
+  history,
+  checkSize = true,
+}) {
   const amount = round4(notional);
   const marketCap = marketCapDollars(caps);
   const nextMarket = round4(marketExposure + amount);
   const nextDaily = round4(dailyNotional + amount);
   const reasons = [];
   if (!(amount > 0)) reasons.push("notional must be positive");
-  if (amount > caps.max_dollars_per_idea) {
-    reasons.push(`idea $${amount} exceeds $${caps.max_dollars_per_idea} per idea`);
-  }
+  if (checkSize) reasons.push(...tradeSizeReasons(amount, caps, history));
   if (nextMarket > marketCap) {
     reasons.push(`market would be $${nextMarket}, cap is $${marketCap} (${caps.max_sleeve_fraction * 100}% of the $${caps.sleeve_dollars} sleeve)`);
   }
@@ -134,7 +217,7 @@ export function contractsForBudget(dollars, stake) {
   return contracts > 0 ? contracts : 0;
 }
 
-export function sizeIdeas(ideas, { caps, marketExposure = {}, dailyNotional = 0 }) {
+export function sizeIdeas(ideas, { caps, marketExposure = {}, dailyNotional = 0, history } = {}) {
   const used = { ...marketExposure };
   let dailyLeft = round4(caps.max_daily_notional - dailyNotional);
   const recommendations = [];
@@ -142,9 +225,8 @@ export function sizeIdeas(ideas, { caps, marketExposure = {}, dailyNotional = 0 
   for (const idea of ideas) {
     const already = used[idea.ticker] || 0;
     const marketRoom = round4(marketCapDollars(caps) - already);
-    const ideaCap = idea.lane === "likely"
-      ? round4(caps.max_dollars_per_idea * caps.likely_size_fraction)
-      : caps.max_dollars_per_idea;
+    const factor = situationFactor(idea);
+    const ideaCap = scaledBudget(caps, history, factor);
     const budget = round4(Math.min(ideaCap, marketRoom, dailyLeft));
     const contracts = contractsForBudget(budget, idea.stake);
     const notional = contracts > 0 ? round4(contracts * idea.stake) : 0;
@@ -161,6 +243,7 @@ export function sizeIdeas(ideas, { caps, marketExposure = {}, dailyNotional = 0 
     used[idea.ticker] = round4(already + notional);
     recommendations.push({
       ...idea,
+      situation_factor: factor,
       suggested_dollars: notional,
       suggested_contracts: contracts,
     });
@@ -258,6 +341,57 @@ function fillNotional(fill) {
   return round4(count * yes);
 }
 
+function dollarField(row, dollarKey, centKey) {
+  if (!row) return null;
+  if (row[dollarKey] != null && row[dollarKey] !== "") {
+    const parsed = parseDollars(row[dollarKey]);
+    if (parsed != null) return parsed;
+  }
+  if (row[centKey] != null && row[centKey] !== "") {
+    const cents = Number(row[centKey]);
+    if (Number.isFinite(cents)) return round4(cents / 100);
+  }
+  return null;
+}
+
+export function assessWinHistory({ positions, fills } = {}) {
+  const posRows = rowsOf(positions, "market_positions", "positions");
+  const fillRows = rowsOf(fills, "fills");
+  const sellCount = fillRows.filter((fill) => String(fill.action || "").toLowerCase() === "sell").length;
+  let realizedPositions = 0;
+  let net = 0;
+  let sawPnl = false;
+  for (const row of posRows) {
+    const pnl = dollarField(row, "realized_pnl_dollars", "realized_pnl");
+    if (pnl == null) continue;
+    sawPnl = true;
+    if (pnl !== 0) realizedPositions += 1;
+    const fees = dollarField(row, "fees_paid_dollars", "fees_paid") ?? 0;
+    net = round4(net + pnl - fees);
+  }
+  if (!sawPnl) {
+    for (const fill of fillRows) {
+      const pnl = dollarField(fill, "realized_pnl_dollars", "realized_pnl");
+      if (pnl == null) continue;
+      const fees = dollarField(fill, "fee_cost_dollars", "fee_cost")
+        ?? dollarField(fill, "fees_paid_dollars", "fees_paid")
+        ?? 0;
+      net = round4(net + pnl - fees);
+    }
+  }
+  const closed = Math.max(sellCount, realizedPositions);
+  return {
+    closed_trades: closed,
+    net_realized: net,
+    allows_scale: closed >= MIN_CLOSED_TRADES && net > 0,
+    min_closed_trades: MIN_CLOSED_TRADES,
+  };
+}
+
+export function closedHistory() {
+  return assessWinHistory({});
+}
+
 export function summarizeBook({ positions, fills, orders, ledger, now = new Date() }) {
   const byTicker = {};
   const contractsByTicker = {};
@@ -300,7 +434,13 @@ export function summarizeBook({ positions, fills, orders, ledger, now = new Date
     }
   }
 
-  return { byTicker, contractsByTicker, daily, day };
+  return {
+    byTicker,
+    contractsByTicker,
+    daily,
+    day,
+    history: assessWinHistory({ positions, fills }),
+  };
 }
 
 export async function loadRiskBook(client, ledger, now = new Date()) {
