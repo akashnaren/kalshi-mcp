@@ -6,7 +6,14 @@ from pathlib import Path
 
 from kalshi_readonly.recommend import FIND_BEST_TOOL, find_best_bets
 from kalshi_readonly.routine import FE_ROUTINE, fe_routine
-from kalshi_readonly.score import edge_net_cents, fee_dome_cents, flb_band, taker_longshot_allowed
+from kalshi_readonly.score import (
+    depth_haircut_cents,
+    edge_net_cents,
+    fee_dome_cents,
+    flb_band,
+    maker_fee_cents,
+    taker_longshot_allowed,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,6 +46,14 @@ def test_fee_dome_and_band() -> None:
     assert flb_band(Decimal("0.15")) == "10–25¢"
     net = edge_net_cents(Decimal("0.70"), Decimal("0.15"), Decimal("0.14"))
     assert net > Decimal(8)
+    assert fee_dome_cents(Decimal("0.50"), multiplier=Decimal(2)) == Decimal(4)
+    assert maker_fee_cents(Decimal("0.50"), multiplier=None) == Decimal(0)
+    assert maker_fee_cents(Decimal("0.50"), multiplier=Decimal(1)) == Decimal(1)
+    assert depth_haircut_cents(Decimal("80")) == Decimal(0)
+    assert depth_haircut_cents(Decimal("1")) == Decimal(2)
+    deep = edge_net_cents(Decimal("0.70"), Decimal("0.15"), Decimal("0.14"), depth=Decimal("80"))
+    thin = edge_net_cents(Decimal("0.70"), Decimal("0.15"), Decimal("0.14"), depth=Decimal("1"))
+    assert deep - thin == Decimal("2.00")
 
 
 def test_ranked_row_carries_edge_net_and_quarter_kelly(monkeypatch) -> None:
@@ -75,6 +90,7 @@ def test_ranked_row_carries_edge_net_and_quarter_kelly(monkeypatch) -> None:
     assert "0.07" in row["fee_dome"]
     assert row["side_exec"] == "maker"
     assert row["SIDE_EXEC"] == "maker"
+    assert row["maker_flag"] is True
     assert row["days_to_res"] == "7.00"
     assert row["DAYS_TO_RES"] == "7.00"
     assert row["spread_cents"] == "1.00"
@@ -275,4 +291,39 @@ def test_maker_sorts_ahead_of_an_equal_score_taker(monkeypatch) -> None:
     assert [row["ticker"] for row in rows] == ["Z-MAKE", "A-TAKE"]
     assert rows[0]["side_exec"] == "maker"
     assert rows[1]["side_exec"] == "taker"
+    assert rows[0]["maker_flag"] is True
+    assert rows[1]["maker_flag"] is False
+    assert rows[0]["spread_cents"] == "1.00"
+    assert rows[0]["depth_at_ask"] == "80.0000"
     assert rows[0]["score"] == rows[1]["score"]
+
+
+def test_series_multiplier_scales_taker_and_maker_fees(monkeypatch) -> None:
+    def fake_public_get(path: str, query=None):
+        return {
+            "markets": [
+                _market("M-MAKE", fee_multiplier="2"),
+                _market("M-TAKE", yes_bid_dollars="0", fee_multiplier="2"),
+            ],
+            "cursor": "",
+        }
+
+    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    out = find_best_bets(
+        {
+            "beliefs": [
+                {"ticker": "M-MAKE", "side": "yes", "confidence": 0.70, "evidence": "rest under a doubled series"},
+                {"ticker": "M-TAKE", "side": "yes", "confidence": 0.70, "evidence": "take a doubled series"},
+            ]
+        },
+        now=NOW,
+    )
+    by_ticker = {row["ticker"]: row for row in out["recommendations"]}
+    assert by_ticker["M-MAKE"]["maker_flag"] is True
+    assert by_ticker["M-MAKE"]["series_fee_multiplier"] == "2"
+    assert by_ticker["M-MAKE"]["fee_cents_est"] == "1"
+    assert by_ticker["M-TAKE"]["maker_flag"] is False
+    assert by_ticker["M-TAKE"]["side_exec"] == "taker"
+    assert by_ticker["M-TAKE"]["fee_cents_est"] == "2"
+    assert by_ticker["M-TAKE"]["spread_cents"] is None
+    assert Decimal(by_ticker["M-TAKE"]["depth_at_ask"]) >= Decimal("3")

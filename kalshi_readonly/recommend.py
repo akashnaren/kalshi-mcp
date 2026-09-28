@@ -32,6 +32,7 @@ _KEEP_NULL = frozenset({
     "volume_24h",
     "volume_lifetime",
     "corr_group",
+    "series_fee_multiplier",
 })
 
 
@@ -172,9 +173,10 @@ FIND_BEST_TOOL = {
     "description": (
         "Read-only ranking of open Kalshi markets. "
         "Score is estimated_confidence times payout_ratio divided by stake_needed. "
-        "Each row reports edge_net_cents, flb_band, kelly_frac 0.25, stake_mode, "
-        "side_exec (SIDE_EXEC), days_to_res (DAYS_TO_RES), spread_cents, depth_at_ask, "
-        "fee_cents_est, corr_group_hint, and hold_to_res_default (HOLD_TO_RES_DEFAULT). "
+        "Each row reports fee_cents_est (taker M*0.07 or maker M*0.0175; unknown series M is taker 1 and maker 0), "
+        "edge_net_cents after that taker dome and a depth haircut, flb_band, kelly_frac 0.25, stake_mode, "
+        "maker_flag and side_exec (SIDE_EXEC), spread_cents, depth_at_ask, "
+        "days_to_res (DAYS_TO_RES), corr_group_hint, and hold_to_res_default (HOLD_TO_RES_DEFAULT). "
         "min_edge is probability points, default 0.08, and is separate from edge_net_cents. "
         "max_price defaults to 0.84, the hard ceiling, so a 50 to 84 cent contract with edge stays eligible. "
         "Pass a lower max_price to narrow the band. "

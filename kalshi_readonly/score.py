@@ -27,12 +27,78 @@ _CENT = Decimal("0.01")
 _ONE = Decimal("1")
 
 
-def fee_dome_cents(price: Decimal, contracts: Decimal = Decimal(1)) -> Decimal:
-    """Kalshi taker fee in cents: ceil(0.07 * contracts * P * (1-P) * 100)."""
-    if not (Decimal(0) < price < Decimal(1)) or contracts <= 0:
+_TAKER_RATE = Decimal("0.07")
+_MAKER_RATE = Decimal("0.0175")
+_FEE_MULTIPLIER_KEYS = ("fee_multiplier", "series_fee_multiplier", "fee_multiplier_fp")
+
+
+def _schedule_fee_cents(price: Decimal, contracts: Decimal, *, rate: Decimal, multiplier: Decimal) -> Decimal:
+    """ceil(M * rate * contracts * P * (1-P) * 100). Rate is 0.07 taker or 0.0175 maker."""
+    if multiplier <= 0 or not (Decimal(0) < price < Decimal(1)) or contracts <= 0:
         return Decimal(0)
-    raw = Decimal("0.07") * contracts * price * (Decimal(1) - price) * Decimal(100)
+    raw = multiplier * rate * contracts * price * (Decimal(1) - price) * Decimal(100)
     return raw.to_integral_value(rounding=ROUND_CEILING)
+
+
+def series_multiplier(market: dict | None) -> Decimal | None:
+    """Series fee multiplier M when the market payload has one. None means use the defaults."""
+    if not isinstance(market, dict):
+        return None
+    for key in _FEE_MULTIPLIER_KEYS:
+        raw = market.get(key)
+        if raw is None or raw == "" or isinstance(raw, bool):
+            continue
+        try:
+            if isinstance(raw, str):
+                value = Decimal(raw.strip())
+            elif isinstance(raw, int):
+                value = Decimal(raw)
+            elif isinstance(raw, float):
+                value = Decimal(format(raw, ".6f"))
+            else:
+                continue
+        except (InvalidOperation, ValueError):
+            continue
+        if value < 0 or value > 100:
+            continue
+        return value
+    return None
+
+
+def fee_dome_cents(
+    price: Decimal,
+    contracts: Decimal = Decimal(1),
+    *,
+    multiplier: Decimal | None = None,
+) -> Decimal:
+    """Taker fee in cents. Unknown series M defaults to 1."""
+    return _schedule_fee_cents(
+        price,
+        contracts,
+        rate=_TAKER_RATE,
+        multiplier=Decimal(1) if multiplier is None else multiplier,
+    )
+
+
+def maker_fee_cents(
+    price: Decimal,
+    contracts: Decimal = Decimal(1),
+    *,
+    multiplier: Decimal | None = None,
+) -> Decimal:
+    """Maker fee in cents. Unknown series M defaults to 0. A known M uses the 0.0175 schedule."""
+    if multiplier is None:
+        return Decimal(0)
+    return _schedule_fee_cents(price, contracts, rate=_MAKER_RATE, multiplier=multiplier)
+
+
+def depth_haircut_cents(depth: Decimal | None) -> Decimal:
+    """Cents removed when the ask shows fewer than 3 contracts. Capped at 2. Zero at or above 3."""
+    if depth is None or depth >= Decimal(3):
+        return Decimal(0)
+    if depth <= 0:
+        return Decimal(2)
+    return min(Decimal(3) - depth, Decimal(2)).quantize(Decimal("0.01"))
 
 
 def flb_band(price: Decimal) -> str:
@@ -95,14 +161,21 @@ def corr_group_hint(belief: dict, market: dict) -> str:
     return "unspecified_event"
 
 
-def edge_net_cents(confidence: Decimal, ask: Decimal, bid: Decimal | None) -> Decimal:
-    """Confidence minus the ask, minus the fee dome and half the spread, in cents."""
-    fee = fee_dome_cents(ask, Decimal(1))
+def edge_net_cents(
+    confidence: Decimal,
+    ask: Decimal,
+    bid: Decimal | None,
+    *,
+    depth: Decimal | None = None,
+    multiplier: Decimal | None = None,
+) -> Decimal:
+    """(confidence - ask) in cents, minus the taker fee dome, half the spread, and the depth haircut."""
+    fee = fee_dome_cents(ask, Decimal(1), multiplier=multiplier)
     spread = Decimal(0)
     if bid is not None and bid > 0 and ask > bid:
         spread = (ask - bid) * Decimal(100) / Decimal(2)
     gross = (confidence - ask) * Decimal(100)
-    return (gross - fee - spread).quantize(Decimal("0.01"))
+    return (gross - fee - spread - depth_haircut_cents(depth)).quantize(Decimal("0.01"))
 
 
 def score_formula(confidence: Decimal, payout_ratio: Decimal, stake: Decimal) -> Decimal:
@@ -489,10 +562,18 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
     match = belief.get("settlement_match_score")
     if match is not None and match < 1:
         return None, "skipped_settlement"
-    net_cents = edge_net_cents(confidence, screened["stake"], screened.get("bid"))
+    multiplier = series_multiplier(market)
     exec_side = side_exec_for(screened["stake"], screened.get("bid"))
+    fee_one = fee_dome_cents(screened["stake"], Decimal(1), multiplier=multiplier)
+    fee_est = maker_fee_cents(screened["stake"], Decimal(1), multiplier=multiplier) if exec_side == "maker" else fee_one
+    net_cents = edge_net_cents(
+        confidence,
+        screened["stake"],
+        screened.get("bid"),
+        depth=screened.get("ask_size"),
+        multiplier=multiplier,
+    )
     band = flb_band(screened["stake"])
-    fee_one = fee_dome_cents(screened["stake"], Decimal(1))
     dollar_cap = options.max_risk
     if band == "<10¢":
         dollar_cap = min(dollar_cap, Decimal("2"))
@@ -515,7 +596,6 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
     spread = spread_cents_for(screened["stake"], screened.get("bid"))
     hold = hold_to_res_default(days=days, net_cents=net_cents, fee_cents=fee_one)
     maker_near = exec_side == "maker" and fee_one <= MAKER_NEAR_CENTS
-    fee_est = Decimal(0) if exec_side == "maker" else fee_one
     hint = corr_group_hint(belief, market)
     volume_24h = screened.get("volume_24h")
     lifetime = screened.get("volume_lifetime")
@@ -563,11 +643,13 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
         "ask_size": _q4(screened["ask_size"]),
         "side_exec": exec_side,
         "SIDE_EXEC": exec_side,
+        "maker_flag": exec_side == "maker",
         "days_to_res": format(days, "f"),
         "DAYS_TO_RES": format(days, "f"),
         "spread_cents": format(spread, "f") if spread is not None else None,
         "depth_at_ask": _q4(screened["ask_size"]),
         "fee_cents_est": format(fee_est, "f"),
+        "series_fee_multiplier": _plain(multiplier) if multiplier is not None else None,
         "corr_group_hint": hint,
         "hold_to_res_default": hold,
         "HOLD_TO_RES_DEFAULT": hold,
@@ -580,8 +662,8 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
         "model_sources": belief.get("model_sources"),
         "edge_net_cents": format(net_cents, "f"),
         "flb_band": flb_band(screened["stake"]),
-        "fee_entry_cents": format(fee_dome_cents(screened["stake"], Decimal(1)), "f"),
-        "fee_dome": "ceil(0.07 * contracts * price * (1 - price)) cents",
+        "fee_entry_cents": format(fee_one, "f"),
+        "fee_dome": "ceil(M * 0.07 * contracts * price * (1 - price)) cents; maker uses 0.0175 when M is set, else maker M=0",
         "kelly_frac": "0.25",
         "stake_mode": stake_mode_for(screened["stake"]),
         "yes_no_replicate": "clear",
