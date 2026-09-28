@@ -118,8 +118,10 @@ def test_find_best_bets_ranks_cheap_high_confidence_over_near_certain(monkeypatc
     assert Decimal(cheap["payout_ratio"]) == payout_ratio.quantize(Decimal("0.0001"))
     assert Decimal(cheap["score"]) == expected
     assert Decimal(cheap["assumed_edge"]) == confidence - stake
-    assert Decimal(cheap["suggested_max_dollars_risked"]) == Decimal("4.95")
-    assert cheap["suggested_contracts"] == 33
+    assert cheap["flb_band"] == "10–25¢"
+    assert cheap["stake_mode"] == "fixed_2"
+    assert Decimal(cheap["suggested_max_dollars_risked"]) == Decimal("1.95")
+    assert cheap["suggested_contracts"] == 13
     assert cheap["do_not_place"] == DO_NOT_PLACE
     assert "three reports agree" in cheap["rationale"]
     assert Decimal(cheap["score"]) > Decimal(out["recommendations"][1]["score"])

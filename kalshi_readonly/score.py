@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN
 
 DO_NOT_PLACE = "Finance Engineer may place under the caps with confirm true"
-LONGSHOT_EDGE = Decimal("0.08")
+LONGSHOT_NET_CENTS = Decimal(8)
 MAKER_NEAR_CENTS = Decimal("2")
 _DAY = Decimal(24)
 FORMULA = "estimated_confidence * payout_ratio / stake_needed"
@@ -203,9 +203,9 @@ def spread_cents_for(ask: Decimal, bid: Decimal | None) -> Decimal | None:
     return ((ask - bid) * Decimal(100)).quantize(Decimal("0.01"))
 
 
-def taker_longshot_allowed(*, allow_longshot: bool, edge: Decimal) -> bool:
-    """Taker quotes in the <10¢ band stay only for a named longshot with edge ≥ 0.08."""
-    return allow_longshot and edge >= LONGSHOT_EDGE
+def taker_longshot_allowed(*, allow_longshot: bool, net_cents: Decimal) -> bool:
+    """Taker quotes in the <10¢ band stay only for a named longshot with edge_net_cents >= 8."""
+    return allow_longshot and net_cents >= LONGSHOT_NET_CENTS
 
 
 def hold_to_res_default(*, days: Decimal, net_cents: Decimal, fee_cents: Decimal) -> bool:
@@ -576,6 +576,7 @@ def _empty_counts(scanned: int) -> dict[str, int]:
         "skipped_price": 0,
         "skipped_confidence": 0,
         "skipped_edge": 0,
+        "skipped_edge_net": 0,
         "skipped_risk": 0,
         "skipped_flb": 0,
         "skipped_fee_blind": 0,
@@ -673,16 +674,19 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
         depth=screened.get("ask_size"),
         multiplier=m_taker,
     )
+    if net_cents <= 0:
+        return None, "skipped_edge_net"
     band = flb_band(screened["stake"])
     dollar_cap = options.max_risk
-    if band == "<10¢":
+    if band in {"<10¢", "10–25¢"}:
         dollar_cap = min(dollar_cap, Decimal("2"))
+    if band == "<10¢":
         if exec_side == "taker" and not taker_longshot_allowed(
             allow_longshot=belief.get("allow_longshot") is True,
-            edge=edge,
+            net_cents=net_cents,
         ):
             return None, "skipped_flb"
-        if exec_side != "taker" and net_cents < Decimal(8):
+        if exec_side != "taker" and net_cents < LONGSHOT_NET_CENTS:
             return None, "skipped_flb"
     affordable = int((dollar_cap / screened["stake"]).to_integral_value(rounding=ROUND_DOWN))
     size_cap = int(screened["ask_size"].to_integral_value(rounding=ROUND_DOWN))

@@ -187,7 +187,9 @@ FIND_BEST_TOOL = {
         "max_price defaults to 0.84, the hard ceiling, so a 50 to 84 cent contract with edge stays eligible. "
         "Pass a lower max_price to narrow the band. "
         "Lifetime volume of at least 1000 passes the floor. 24h min_volume is the weaker proxy. Both are on the row. "
-        "A taker quote under 10 cents is dropped unless allow_longshot is true, edge is at least 0.08, and stake is $2. "
+        "A recommendation with edge_net_cents at or below 0 is dropped. "
+        "A taker quote under 10 cents is dropped unless allow_longshot is true, edge_net_cents is at least 8, and stake is $2. "
+        "A 10 to 25 cent quote is stake_mode fixed_2 and suggested risk is capped at $2. "
         "Pass beliefs with ticker, side (yes or no), confidence, and optional evidence. "
         "Without beliefs, returns a short research queue and no recommendations. "
         "A later scan page that is rate limited sets rate_limited true and keeps pages already fetched. "
@@ -209,7 +211,7 @@ FIND_BEST_TOOL = {
                         "evidence": {"type": "string"},
                         "allow_longshot": {
                             "type": "boolean",
-                            "description": "Keep a taker quote in the <10¢ band. Requires edge at least 0.08 and forces a $2 stake.",
+                            "description": "Keep a taker quote in the <10¢ band. Requires edge_net_cents at least 8 and forces a $2 stake.",
                         },
                         "corr_group": {
                             "type": "string",
