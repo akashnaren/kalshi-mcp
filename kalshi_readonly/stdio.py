@@ -49,7 +49,7 @@ def _write_message(msg: dict) -> None:
 def run_server(
     name: str,
     version: str,
-    tools: list[dict],
+    tools: list[dict] | Callable[[], list[dict]],
     handlers: dict[str, Callable[[dict], Any]],
 ) -> None:
     while True:
@@ -74,7 +74,8 @@ def run_server(
         elif method == "notifications/initialized":
             continue
         elif method == "tools/list":
-            _write_message({"jsonrpc": "2.0", "id": mid, "result": {"tools": tools}})
+            listed = tools() if callable(tools) else tools
+            _write_message({"jsonrpc": "2.0", "id": mid, "result": {"tools": listed}})
         elif method == "tools/call":
             try:
                 handler = handlers.get(params.get("name"))

@@ -1,9 +1,11 @@
-"""The three read-only tools. No order, cancel, or transfer handlers exist."""
+"""Read tools plus confirm-gated order tools. No deposit, withdraw, or strategy."""
 
 from __future__ import annotations
 
 from kalshi_readonly import __version__
+from kalshi_readonly.gates import TRADE_WRITES, safe_mode
 from kalshi_readonly.http import auth_get, public_get
+from kalshi_readonly.orders import amend_order, cancel_order, decrease_order, list_open_orders, place_order
 from kalshi_readonly.report import present_balance, present_fills, present_positions
 from kalshi_readonly.stdio import run_server
 
@@ -67,6 +69,11 @@ def cash_or_positions(args: dict | None = None) -> dict:
     return out
 
 
+_CONFIRM = {
+    "type": "boolean",
+    "description": "Must be true. Ask the operator before setting this. The server never sets it.",
+}
+
 TOOLS = [
     {
         "name": "exchange_status",
@@ -102,14 +109,143 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "list_open_orders",
+        "description": (
+            "Read resting Kalshi orders. Requires API key env. "
+            "Optional ticker, limit, and cursor. Does not place, cancel, amend, or decrease. "
+            "Stays available while KALSHI_SAFE_MODE is on."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string"},
+                "limit": {"type": "integer"},
+                "cursor": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "place_order",
+        "description": (
+            "Place one Kalshi limit or immediate order (POST /portfolio/events/orders). "
+            "side is bid (buy YES) or ask (sell YES). price is a fixed-point dollar string such as \"0.5600\". "
+            "count is a contract count. Hidden until KALSHI_SAFE_MODE=0. Requires confirm: true after an explicit human ask. "
+            "The server never sets confirm. No deposit, withdraw, or strategy."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string"},
+                "side": {"type": "string", "enum": ["bid", "ask"]},
+                "count": {"type": "string"},
+                "price": {"type": "string"},
+                "time_in_force": {
+                    "type": "string",
+                    "enum": ["fill_or_kill", "good_till_canceled", "immediate_or_cancel"],
+                },
+                "self_trade_prevention_type": {"type": "string", "enum": ["taker_at_cross", "maker"]},
+                "client_order_id": {"type": "string"},
+                "expiration_time": {"type": "integer"},
+                "post_only": {"type": "boolean"},
+                "cancel_order_on_pause": {"type": "boolean"},
+                "reduce_only": {"type": "boolean"},
+                "subaccount": {"type": "integer"},
+                "exchange_index": {"type": "integer"},
+                "order_group_id": {"type": "string"},
+                "confirm": _CONFIRM,
+            },
+            "required": ["ticker", "side", "count", "price", "confirm"],
+        },
+    },
+    {
+        "name": "cancel_order",
+        "description": (
+            "Cancel one resting Kalshi order (DELETE /portfolio/events/orders/{order_id}). "
+            "ticker is the market ticker used to route the cancel. "
+            "Hidden until KALSHI_SAFE_MODE=0. Requires confirm: true after an explicit human ask. "
+            "The server never sets confirm."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string"},
+                "ticker": {"type": "string"},
+                "subaccount": {"type": "integer"},
+                "exchange_index": {"type": "integer"},
+                "confirm": _CONFIRM,
+            },
+            "required": ["order_id", "ticker", "confirm"],
+        },
+    },
+    {
+        "name": "amend_order",
+        "description": (
+            "Amend price and/or max fillable count (POST /portfolio/events/orders/{order_id}/amend). "
+            "count is filled plus the desired resting remainder, not the remainder alone. "
+            "Decreasing size keeps queue position; a price change or a larger size does not. "
+            "Hidden until KALSHI_SAFE_MODE=0. Requires confirm: true after an explicit human ask. "
+            "The server never sets confirm."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string"},
+                "ticker": {"type": "string"},
+                "side": {"type": "string", "enum": ["bid", "ask"]},
+                "price": {"type": "string"},
+                "count": {"type": "string"},
+                "client_order_id": {"type": "string"},
+                "updated_client_order_id": {"type": "string"},
+                "exchange_index": {"type": "integer"},
+                "subaccount": {"type": "integer"},
+                "confirm": _CONFIRM,
+            },
+            "required": ["order_id", "ticker", "side", "price", "count", "confirm"],
+        },
+    },
+    {
+        "name": "decrease_order",
+        "description": (
+            "Reduce a resting order (POST /portfolio/events/orders/{order_id}/decrease). "
+            "Pass exactly one of reduce_by or reduce_to. "
+            "Hidden until KALSHI_SAFE_MODE=0. Requires confirm: true after an explicit human ask. "
+            "The server never sets confirm."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string"},
+                "ticker": {"type": "string"},
+                "reduce_by": {"type": "string"},
+                "reduce_to": {"type": "string"},
+                "exchange_index": {"type": "integer"},
+                "subaccount": {"type": "integer"},
+                "confirm": _CONFIRM,
+            },
+            "required": ["order_id", "confirm"],
+        },
+    },
 ]
 
 HANDLERS = {
     "exchange_status": exchange_status,
     "list_markets": list_markets,
     "cash_or_positions": cash_or_positions,
+    "list_open_orders": list_open_orders,
+    "place_order": place_order,
+    "cancel_order": cancel_order,
+    "amend_order": amend_order,
+    "decrease_order": decrease_order,
 }
 
 
+def visible_tools() -> list[dict]:
+    """Omit trade writes while safe mode is on so the catalog matches what can run."""
+    if safe_mode():
+        return [tool for tool in TOOLS if tool["name"] not in TRADE_WRITES]
+    return list(TOOLS)
+
+
 def main() -> None:
-    run_server("kalshi-readonly", __version__, TOOLS, HANDLERS)
+    run_server("kalshi-readonly", __version__, visible_tools, HANDLERS)

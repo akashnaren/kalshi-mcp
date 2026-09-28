@@ -1,4 +1,4 @@
-"""Load the API key and sign GET requests. Never log or return the private key."""
+"""Load the API key and sign requests. Never log or return the private key."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 DEFAULT_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
-USER_AGENT = "tinkabot-kalshi-mcp/0.1"
+USER_AGENT = "tinkabot-kalshi-mcp/0.2"
 AUTH_ERROR = "auth required: set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH (or KALSHI_PRIVATE_KEY_PEM)"
 
 

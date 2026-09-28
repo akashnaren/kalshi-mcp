@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from kalshi_readonly.auth import AUTH_ERROR
-from kalshi_readonly.tools import TOOLS, cash_or_positions
+from kalshi_readonly.tools import cash_or_positions, visible_tools
 
 
 def _pem() -> str:
@@ -44,8 +44,14 @@ class _Body:
         return False
 
 
-def test_tools_are_read_only() -> None:
-    assert [tool["name"] for tool in TOOLS] == ["exchange_status", "list_markets", "cash_or_positions"]
+def test_default_catalog_is_read_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KALSHI_SAFE_MODE", raising=False)
+    assert [tool["name"] for tool in visible_tools()] == [
+        "exchange_status",
+        "list_markets",
+        "cash_or_positions",
+        "list_open_orders",
+    ]
 
 
 def test_cash_or_positions_signs_get_and_reports_official_fields(monkeypatch: pytest.MonkeyPatch) -> None:
