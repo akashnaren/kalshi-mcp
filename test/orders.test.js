@@ -260,12 +260,17 @@ test("a profitable sleeve can size up, and nothing clears the hard max", async (
     client, env, confirm: true, ticker: "KXNEW-1", side: "bid", count: 20, price: 0.8,
     research: research({ p_model: 0.95, corr_group: "fed_path" }),
   }), /hard max/);
-  const placed = await placeOrder({
+  await assert.rejects(() => placeOrder({
     client, env, confirm: true, ticker: "KXNEW-1", side: "bid", count: 100, price: 0.15,
     research: research({ corr_group: "city_weather_week" }),
+  }), /fixed_2/);
+  const placed = await placeOrder({
+    client, env, confirm: true, ticker: "KXNEW-1", side: "bid", count: 10, price: 0.6,
+    research: research({ p_model: 0.85, corr_group: "fed_path" }),
   });
-  assert.equal(placed.notional, 15);
-  assert.equal(calls[0].count, "100.00");
+  assert.equal(placed.notional, 6);
+  assert.equal(placed.stake_mode, "modest");
+  assert.equal(calls[0].count, "10.00");
 
   const grown = await amendOrder({
     client, env, confirm: true, orderId: "abc12345", ticker: "KXTEST-26-T1", side: "bid", price: 0.1, count: 20,

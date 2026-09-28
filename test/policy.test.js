@@ -89,8 +89,52 @@ test("higher edge_net outranks a larger payoff", () => {
   assert.equal(typeof best.maker_flag, "boolean");
   assert.ok(best.depth_at_limit >= 10);
   assert.equal(best.fee_entry_cents >= 1, true);
+  assert.equal(best.stake_mode, "fixed_2");
+  assert.equal(best.kelly_frac, 0.25);
+  assert.equal(best.volume_floor_ok, false);
+  assert.equal(best.edge_after_fees, best.edge_net_cents);
   assert.deepEqual(best.keys, ["nhc_cone_includes_city"]);
   assert.equal(ranked.skipped.low_confidence, 1);
+});
+
+test("a dominated yes leg is dropped when the yes mids sum through 1 plus fees", () => {
+  const ranked = rankMarkets(
+    [
+      market({
+        ticker: "YES-HI",
+        event_ticker: "SPLIT-1",
+        yes_bid_dollars: "0.5800",
+        yes_ask_dollars: "0.6200",
+        yes_ask_size_fp: "80.00",
+      }),
+      market({
+        ticker: "YES-LO",
+        event_ticker: "SPLIT-1",
+        yes_bid_dollars: "0.5300",
+        yes_ask_dollars: "0.5700",
+        yes_ask_size_fp: "80.00",
+      }),
+    ],
+    [
+      signal({
+        market_ticker: "YES-HI",
+        confidence: 0.8,
+        key: "city_high_model",
+        detail: "Ensemble mean is 4 degrees through the high strike",
+      }),
+      signal({
+        market_ticker: "YES-LO",
+        confidence: 0.75,
+        key: "city_low_model",
+        detail: "Ensemble mean is 3 degrees through the low strike",
+        corr_group: "city_temp_split",
+      }),
+    ],
+    filters({ min_confidence: 0 }),
+  );
+  assert.deepEqual(ranked.recommendations.map((row) => row.ticker), ["YES-LO"]);
+  assert.equal(ranked.recommendations[0].yes_no_replicate, "cheaper_leg");
+  assert.equal(ranked.skipped.yes_no_replicate, 1);
 });
 
 test("disagreement and thin books are not recommendations", () => {

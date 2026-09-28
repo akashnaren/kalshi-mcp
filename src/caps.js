@@ -1,4 +1,14 @@
-import { drawdownScale, fractionalKellyDollars } from "./edge.js";
+import {
+  BANKROLL_UTIL_MAX,
+  DEPTH_STAKE_MULTIPLE,
+  EVENT_DOLLAR_CAP,
+  EVENT_FRACTION,
+  MAX_OPEN_POSITIONS,
+  drawdownScale,
+  fractionalKellyDollars,
+  stakeCapDollars,
+  stakeModeFor,
+} from "./edge.js";
 import { PolicyError, parseCount, parseDollars, round4 } from "./policy.js";
 
 export const HARD_TRADE_CEILING = 15;
@@ -9,7 +19,7 @@ export const CAP_DEFAULTS = Object.freeze({
   default_dollars_per_trade: 2,
   max_dollars_per_trade: HARD_TRADE_CEILING,
   max_sleeve_fraction: 0.15,
-  max_group_fraction: 0.2,
+  max_group_fraction: 0.3,
   max_daily_notional: 10,
   take_profit_return: 0.5,
   cut_loss_return: -0.4,
@@ -48,7 +58,7 @@ export function loadCaps(env = process.env) {
     default_dollars_per_trade: defaultTrade,
     max_dollars_per_trade: maxTrade,
     max_sleeve_fraction: readNumber(env, "KALSHI_MAX_SLEEVE_FRACTION", CAP_DEFAULTS.max_sleeve_fraction, 0.01, 1),
-    max_group_fraction: readNumber(env, "KALSHI_MAX_GROUP_FRACTION", CAP_DEFAULTS.max_group_fraction, 0.01, 0.2),
+    max_group_fraction: readNumber(env, "KALSHI_MAX_GROUP_FRACTION", CAP_DEFAULTS.max_group_fraction, 0.01, 0.3),
     max_daily_notional: readNumber(env, "KALSHI_MAX_DAILY_NOTIONAL", CAP_DEFAULTS.max_daily_notional, 0.01, 1_000_000),
     take_profit_return: readNumber(env, "KALSHI_TAKE_PROFIT_RETURN", CAP_DEFAULTS.take_profit_return, 0.01, 10),
     cut_loss_return: readNumber(env, "KALSHI_CUT_LOSS_RETURN", CAP_DEFAULTS.cut_loss_return, -0.99, -0.01),
@@ -98,12 +108,13 @@ function baseDefault(caps) {
   return Math.min(Number(caps.default_dollars_per_trade) || 0, tradeCeiling(caps));
 }
 
-function sizeReasons(amount, caps, history, kellyDollars) {
+function sizeReasons(amount, caps, history, kellyDollars, stakeMode) {
   const sized = round4(amount);
   const ceiling = tradeCeiling(caps);
   const historyCap = history?.allows_scale ? ceiling : baseDefault(caps);
   const kellyCap = Number.isFinite(Number(kellyDollars)) ? Number(kellyDollars) : historyCap;
-  const allowed = round4(Math.min(historyCap, Math.max(0, kellyCap)));
+  const modeCap = stakeMode ? stakeCapDollars(stakeMode, history) : historyCap;
+  const allowed = round4(Math.min(historyCap, modeCap, Math.max(0, kellyCap)));
   const reasons = [];
   if (sized > HARD_TRADE_CEILING) {
     reasons.push(`hard max $${HARD_TRADE_CEILING} per trade`);
@@ -111,9 +122,12 @@ function sizeReasons(amount, caps, history, kellyDollars) {
     reasons.push(`trade ceiling is $${ceiling}`);
   } else if (sized > historyCap) {
     reasons.push(`size stays at the $${round4(baseDefault(caps))} default until fill history shows the sleeve is profitable`);
+  } else if (stakeMode === "fixed_2" && sized > modeCap) {
+    reasons.push(`STAKE_MODE fixed_2 keeps this price at $${modeCap}`);
+  } else if (stakeMode === "modest" && sized > modeCap) {
+    reasons.push(`STAKE_MODE modest caps this price at $${modeCap}`);
   } else if (sized > allowed) {
-    const frac = history?.allows_scale ? "half" : "quarter";
-    reasons.push(`size $${sized} is above ${frac}-Kelly ($${allowed})`);
+    reasons.push(`size $${sized} is above quarter-Kelly ($${allowed})`);
   }
   return reasons;
 }
@@ -182,6 +196,22 @@ export function groupCapDollars(caps) {
   return round4(caps.sleeve_dollars * (caps.max_group_fraction ?? CAP_DEFAULTS.max_group_fraction));
 }
 
+export function bankrollCapDollars(caps) {
+  return round4(caps.sleeve_dollars * BANKROLL_UTIL_MAX);
+}
+
+export function eventCapDollars(caps) {
+  return round4(Math.min(EVENT_DOLLAR_CAP, caps.sleeve_dollars * EVENT_FRACTION));
+}
+
+export function deployedDollars(exposure = {}) {
+  return round4(Object.values(exposure).reduce((sum, value) => sum + (Number(value) > 0 ? Number(value) : 0), 0));
+}
+
+export function openPositionCount(exposure = {}) {
+  return Object.values(exposure).filter((value) => Number(value) > 0).length;
+}
+
 export function checkBuyCaps({
   notional,
   marketExposure = 0,
@@ -192,6 +222,11 @@ export function checkBuyCaps({
   kellyDollars,
   corrGroup,
   groupExposure = 0,
+  stakeMode,
+  bankrollDeployed,
+  openPositions,
+  eventTicker,
+  eventExposure = 0,
 }) {
   const amount = round4(notional);
   const marketCap = marketCapDollars(caps);
@@ -199,7 +234,24 @@ export function checkBuyCaps({
   const nextDaily = round4(dailyNotional + amount);
   const reasons = [];
   if (!(amount > 0)) reasons.push("notional must be positive");
-  if (checkSize) reasons.push(...sizeReasons(amount, caps, history, kellyDollars));
+  if (checkSize) reasons.push(...sizeReasons(amount, caps, history, kellyDollars, stakeMode));
+  if (openPositions != null && !(marketExposure > 0) && openPositions >= MAX_OPEN_POSITIONS) {
+    reasons.push(`open positions are ${openPositions}, cap is ${MAX_OPEN_POSITIONS}`);
+  }
+  if (bankrollDeployed != null) {
+    const utilCap = bankrollCapDollars(caps);
+    const nextBook = round4(bankrollDeployed + amount);
+    if (nextBook > utilCap) {
+      reasons.push(`bankroll_util would be $${nextBook}, cap is $${utilCap} (40% of the sleeve)`);
+    }
+  }
+  if (eventTicker) {
+    const nextEvent = round4(eventExposure + amount);
+    const eventCap = eventCapDollars(caps);
+    if (nextEvent > eventCap) {
+      reasons.push(`event ${eventTicker} would be $${nextEvent}, cap is $${eventCap}`);
+    }
+  }
   if (corrGroup) {
     const nextGroup = round4(groupExposure + amount);
     const groupCap = groupCapDollars(caps);
@@ -241,15 +293,32 @@ export function sizeIdeas(ideas, {
   dailyNotional = 0,
   history,
   groupExposure = {},
+  eventExposure = {},
   drawdown = 0,
+  oosCalibration = false,
 } = {}) {
   const used = { ...marketExposure };
   const groups = { ...groupExposure };
+  const events = { ...eventExposure };
   let dailyLeft = round4(caps.max_daily_notional - dailyNotional);
+  let deployed = deployedDollars(used);
+  let openCount = openPositionCount(used);
   const recommendations = [];
   const unsized = [];
   for (const idea of ideas) {
     const already = used[idea.ticker] || 0;
+    const isNew = !(already > 0);
+    if (isNew && openCount >= MAX_OPEN_POSITIONS) {
+      unsized.push({
+        ...idea,
+        suggested_dollars: 0,
+        suggested_contracts: 0,
+        blocked_by: "open_positions",
+      });
+      continue;
+    }
+    const mode = idea.stake_mode || stakeModeFor(idea.stake);
+    const modeCap = Math.min(stakeCapDollars(mode, history), tradeCeiling(caps));
     const marketRoom = round4(marketCapDollars(caps) - already);
     const group = idea.corr_group || "";
     const groupAlready = group ? (groups[group] || 0) : 0;
@@ -257,46 +326,78 @@ export function sizeIdeas(ideas, {
       p: idea.confidence,
       price: idea.stake,
       bankroll: caps.sleeve_dollars,
-      history,
       groupAlreadyOpen: groupAlready > 0,
       drawdown,
+      oosCalibration,
     });
-    const tradeCap = history?.allows_scale ? tradeCeiling(caps) : Math.min(caps.default_dollars_per_trade, tradeCeiling(caps));
-    const groupRoom = group ? round4(groupCapDollars(caps) - groupAlready) : tradeCap;
-    const depthDollars = idea.depth_at_limit > 0 ? round4(idea.depth_at_limit * idea.stake) : tradeCap;
-    const budget = round4(Math.min(kellyDollars, tradeCap, marketRoom, dailyLeft, groupRoom, depthDollars));
-    const contracts = contractsForBudget(budget, idea.stake);
-    const depthLeft = idea.depth_at_limit > 0 ? Math.min(contracts, idea.depth_at_limit) : contracts;
-    const sizedContracts = depthLeft;
-    const notional = sizedContracts > 0 ? round4(sizedContracts * idea.stake) : 0;
+    const groupRoom = group ? round4(groupCapDollars(caps) - groupAlready) : modeCap;
+    const eventKey = idea.event_ticker || "";
+    const eventRoom = eventKey
+      ? round4(eventCapDollars(caps) - (events[eventKey] || 0))
+      : Number.POSITIVE_INFINITY;
+    const bankrollRoom = round4(bankrollCapDollars(caps) - deployed);
+    const depthContracts = idea.depth_at_limit > 0 ? idea.depth_at_limit / DEPTH_STAKE_MULTIPLE : null;
+    const depthDollars = depthContracts == null ? modeCap : round4(depthContracts * idea.stake);
+    const budget = round4(Math.min(
+      kellyDollars,
+      modeCap,
+      marketRoom,
+      dailyLeft,
+      groupRoom,
+      eventRoom,
+      bankrollRoom,
+      depthDollars,
+    ));
+    let contracts = contractsForBudget(budget, idea.stake);
+    if (depthContracts != null) contracts = Math.min(contracts, Math.floor(depthContracts * 100) / 100);
+    const notional = contracts > 0 ? round4(contracts * idea.stake) : 0;
     if (!(notional > 0)) {
       unsized.push({
         ...idea,
+        stake_mode: mode,
         suggested_dollars: 0,
         suggested_contracts: 0,
-        blocked_by: blockReason({ kellyDollars, groupRoom, dailyLeft, marketRoom, drawdown }),
+        blocked_by: blockReason({
+          kellyDollars,
+          groupRoom,
+          dailyLeft,
+          marketRoom,
+          drawdown,
+          bankrollRoom,
+          eventRoom,
+        }),
       });
       continue;
     }
     dailyLeft = round4(dailyLeft - notional);
+    deployed = round4(deployed + notional);
     used[idea.ticker] = round4(already + notional);
+    if (isNew) openCount += 1;
     if (group) groups[group] = round4(groupAlready + notional);
+    if (eventKey) events[eventKey] = round4((events[eventKey] || 0) + notional);
     recommendations.push({
       ...idea,
+      stake_mode: mode,
       kelly_dollars: kellyDollars,
       suggested_dollars: notional,
-      suggested_contracts: sizedContracts,
+      suggested_contracts: contracts,
     });
   }
-  return { recommendations, unsized };
+  return { recommendations, unsized, bankroll_deployed: deployed, open_positions: openCount };
 }
 
-function blockReason({ kellyDollars, groupRoom, dailyLeft, marketRoom, drawdown }) {
+function blockReason({ kellyDollars, groupRoom, dailyLeft, marketRoom, drawdown, bankrollRoom, eventRoom }) {
   if (drawdownScale(drawdown) === 0) return "drawdown";
   if (!(kellyDollars > 0)) return "thin_edge";
-  if (groupRoom <= marketRoom && groupRoom <= dailyLeft) return "corr_group";
-  if (dailyLeft <= marketRoom) return "daily_cap";
-  return "market_cap";
+  const rooms = [
+    ["bankroll_util", bankrollRoom],
+    ["max_per_event", eventRoom],
+    ["corr_group", groupRoom],
+    ["daily_cap", dailyLeft],
+    ["market_cap", marketRoom],
+  ];
+  rooms.sort((a, b) => a[1] - b[1]);
+  return rooms[0][0];
 }
 
 export function reviewPosition(row, rules) {
@@ -306,12 +407,11 @@ export function reviewPosition(row, rules) {
   if (row.falsifier_hit === true) {
     return { ...base, action: "cut", reason: "falsifier hit; exit rather than hold to settlement" };
   }
-  const feeExit = Number.isFinite(Number(row.fee_exit_cents)) ? Number(row.fee_exit_cents) : 2;
-  if (row.edge_net_cents != null && row.edge_net_cents !== "" && Number(row.edge_net_cents) <= -feeExit) {
+  if (row.edge_net_cents != null && row.edge_net_cents !== "" && Number(row.edge_net_cents) <= -2) {
     return {
       ...base,
       action: "cut",
-      reason: "edge_net flipped through the exit fee",
+      reason: "edge_net flipped to EXIT_EDGE_GONE",
       edge_net_cents: Number(row.edge_net_cents),
     };
   }
@@ -320,7 +420,7 @@ export function reviewPosition(row, rules) {
   }
   const pnl = round4(mark - cost);
   const ret = round4(pnl / cost);
-  if (row.edge_net_cents != null && row.edge_net_cents !== "" && Number(row.edge_net_cents) < 1 && ret > 0) {
+  if (row.edge_net_cents != null && row.edge_net_cents !== "" && Number(row.edge_net_cents) >= 0 && Number(row.edge_net_cents) < 1 && ret > 0) {
     return {
       ...base,
       action: "take_profit",
@@ -504,6 +604,7 @@ export function summarizeBook({ positions, fills, orders, ledger, now = new Date
   return {
     byTicker,
     byGroup,
+    byEvent: {},
     contractsByTicker,
     daily,
     day,

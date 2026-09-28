@@ -20,6 +20,7 @@ export async function findBestBets({ client, signals, options = {}, caps, ledger
     dailyNotional: book.dailyNotional,
     history: book.history,
     groupExposure: book.groupExposure,
+    eventExposure: book.eventExposure,
     drawdown: Number(options.drawdown_from_peak) || 0,
   });
   return {
@@ -32,6 +33,9 @@ export async function findBestBets({ client, signals, options = {}, caps, ledger
       max_daily_notional: activeCaps.max_daily_notional,
       max_group_fraction: activeCaps.max_group_fraction,
       market_cap: marketCapDollars(activeCaps),
+      bankroll_util_max: 0.4,
+      max_open_positions: 15,
+      kelly_frac: 0.25,
     },
     win_history: book.history,
     calibration: {
@@ -69,6 +73,7 @@ async function suggestionBook(client, ledger, options, now) {
       dailyNotional: Number(options.daily_notional) || 0,
       history: closedHistory(),
       groupExposure: options.group_exposure ?? {},
+      eventExposure: options.event_exposure ?? {},
       book_error: null,
     };
   }
@@ -79,6 +84,7 @@ async function suggestionBook(client, ledger, options, now) {
       dailyNotional: book.daily,
       history: book.history,
       groupExposure: book.byGroup ?? {},
+      eventExposure: book.byEvent ?? {},
       book_error: null,
     };
   } catch (err) {
@@ -87,6 +93,7 @@ async function suggestionBook(client, ledger, options, now) {
       dailyNotional: Number(options.daily_notional) || 0,
       history: closedHistory(),
       groupExposure: options.group_exposure ?? {},
+      eventExposure: options.event_exposure ?? {},
       book_error: err.message,
     };
   }

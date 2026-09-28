@@ -6,15 +6,17 @@ The sleeve starts around $71.
 
 ## The rule
 
-Gate on `edge_net` after the Kalshi fee dome, the spread, and `depth_at_limit`. Win rate and payoff size are not reasons to trade. Polymarket is not Kalshi. Re-estimate on this sleeve's Kalshi fills.
+Gate on `edge_net` (`edge_net_cents`) after the Kalshi fee dome, the spread, and `depth_at_limit`. Win rate and payoff size are not reasons to trade. Polymarket is not Kalshi. Re-estimate on this sleeve's Kalshi fills.
 
-`fee_dome` is `ceil_cent(0.07 * contracts * price * (1 - price))`. Near 50 cents that is about 2 cents a contract.
+The Kalshi-native prior is Bürgi, Deng, and Whelan, [Makers and Takers](https://www.karlwhelan.com/Papers/Kalshi.pdf).
 
-Default skip: taking prices under 10–15 cents, and buying favorites at or above 97 cents because the win rate looks high. `flb_band` tags the price. Prefer a maker when `edge_net` is small. The default is hold to settlement unless a falsifier hits or `edge_net` flips through the exit fee.
+`fee_dome` is `ceil_cent(0.07 * contracts * price * (1 - price))`. Near 50 cents that is about 2 cents a contract. MIN_EDGE is the max of 2 cents and twice that fee.
 
-Every idea lists `edge_net`, `flb_band`, `horizon_days`, `category_tag`, `corr_group`, `model_sources`, and `settlement_match_score`. A hunch is rejected. Fee-blind backtests and cross-venue arb without settlement identity are skipped.
+`flb_band` tags the price. A price at or under 10 cents is a taker skip unless `edge_net` is at least 8 cents, and that stake stays a fixed $2. Buying favorites at or above 97 cents because the win rate looks high is a skip. Prefer a maker when `edge_net` is small. The default is hold to settlement unless a falsifier hits or `edge_net` flips to −2 cents. A 1–3 cent mark move is not an exit.
 
-Size is quarter Kelly until Kalshi fill history shows the sleeve has been profitable, then half Kelly, clipped by the caps below.
+Every idea lists `edge_net`, `flb_band`, `side_exec`, `stake_mode`, `kelly_frac`, `horizon_days`, `category_tag`, `corr_group`, `model_sources`, and `settlement_match_score`. A hunch is rejected. Fee-blind backtests and cross-venue arb without settlement identity are skipped. Category multipliers are not used. Do not auto-arb.
+
+Size is quarter Kelly (λ=0.25). Half Kelly needs an explicit out-of-sample calibration log. Profitable fill history does not raise λ by itself. Under 25 cents the stake stays $2. At or above 50 cents, modest size can reach $8 once the sleeve has been profitable, still inside the hard max.
 
 ## Caps
 
@@ -22,14 +24,17 @@ These are checked in the process before any order that adds risk. Defaults:
 
 | Cap | Default | Env |
 | --- | --- | --- |
-| Stake | About a $2 default (quarter Kelly until the sleeve is profitable) | `KALSHI_DEFAULT_DOLLARS_PER_TRADE` |
+| Stake | About a $2 default. Under 25 cents it stays $2. At or above 50 cents, $2–$8 after the sleeve is profitable | `KALSHI_DEFAULT_DOLLARS_PER_TRADE` |
 | Hard max per trade | $15 ceiling. Values above 15 are ignored | `KALSHI_MAX_DOLLARS_PER_TRADE` |
 | Per market | 15% of the sleeve | `KALSHI_MAX_SLEEVE_FRACTION` |
-| Per corr_group | 20% of the sleeve | `KALSHI_MAX_GROUP_FRACTION` |
+| Per corr_group | 30% of the sleeve | `KALSHI_MAX_GROUP_FRACTION` |
+| Per event | $15 and 20% of the sleeve | (in process) |
+| Deployed | 40% of the sleeve | (in process) |
+| Open positions | aim 8–15, hard stop at 15 | (in process) |
 | Sleeve | $71 | `KALSHI_SLEEVE_DOLLARS` |
 | New notional per UTC day | $10 | `KALSHI_MAX_DAILY_NOTIONAL` |
 
-15% of $71 is $10.65, so one market cannot take the sleeve. Diversify by independent risk drivers, not by ticker count. The daily cap stops at $10, which binds before the $15 ceiling unless those caps are set wider. Half Kelly up to $15 is available only after the sleeve's own fills are profitable.
+15% of $71 is $10.65, so one market cannot take the sleeve. Diversify by independent risk drivers, not by ticker count. The daily cap stops at $10, which binds before the $15 ceiling unless those caps are set wider. The $15 ceiling on a high-probability idea is available only after the sleeve's own fills are profitable, and still only inside quarter Kelly.
 
 Take profit defaults to +50% (`KALSHI_TAKE_PROFIT_RETURN`). A cut defaults to -40% (`KALSHI_CUT_LOSS_RETURN`). Anything in between is a hold.
 
@@ -104,4 +109,4 @@ EOD: review hold, cut, or take profit, then exit or shrink resting orders. No ne
 npm test
 ```
 
-That checks edge_net after the fee dome, the longshot and 97 cent skips, quarter and half Kelly, the $2 default, the hard max $15, the win-history gate, the 15% / corr_group / $10 caps, the safe-mode lock, and that the stdio process starts.
+That checks edge_net after the fee dome, the 10 cent and 97 cent skips, quarter Kelly, the $2 default, the hard max $15, the win-history gate, the 15% / corr_group / $10 caps, the safe-mode lock, and that the stdio process starts.

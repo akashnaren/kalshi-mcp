@@ -1,6 +1,16 @@
 import crypto from "node:crypto";
-import { checkBuyCaps, loadCaps, loadRiskBook, openingNotional, orderNotional, signedContracts, tradeSizeReasons } from "./caps.js";
-import { assertEarlyExit, evaluateEntry, fractionalKellyDollars, isFeeBlind } from "./edge.js";
+import {
+  checkBuyCaps,
+  deployedDollars,
+  loadCaps,
+  loadRiskBook,
+  openPositionCount,
+  openingNotional,
+  orderNotional,
+  signedContracts,
+  tradeSizeReasons,
+} from "./caps.js";
+import { assertEarlyExit, evaluateEntry, fractionalKellyDollars, isFeeBlind, stakeCapDollars } from "./edge.js";
 import { assertCanMutate, PolicyError, round4 } from "./policy.js";
 
 const ORDER_ID_RE = /^[A-Za-z0-9-]{8,80}$/;
@@ -41,7 +51,19 @@ async function bookOrRefuse(client, ledger) {
   }
 }
 
-function enforceCaps({ notional, ticker, book, caps, history, checkSize = true, kellyDollars, corrGroup, groupExposure = 0 }) {
+function enforceCaps({
+  notional,
+  ticker,
+  book,
+  caps,
+  history,
+  checkSize = true,
+  kellyDollars,
+  corrGroup,
+  groupExposure = 0,
+  stakeMode,
+  eventTicker,
+}) {
   const verdict = checkBuyCaps({
     notional,
     marketExposure: book.byTicker[ticker] || 0,
@@ -52,6 +74,11 @@ function enforceCaps({ notional, ticker, book, caps, history, checkSize = true, 
     kellyDollars,
     corrGroup,
     groupExposure,
+    stakeMode,
+    bankrollDeployed: deployedDollars(book.byTicker),
+    openPositions: openPositionCount(book.byTicker),
+    eventTicker,
+    eventExposure: eventTicker ? (book.byEvent?.[eventTicker] || 0) : 0,
   });
   if (!verdict.ok) {
     throw new PolicyError("CAP", verdict.reasons.join("; "));
@@ -79,7 +106,6 @@ function assertOpeningEdge({ side, price, research, timeInForce }) {
     pModel: research.p_model,
     ask: entryPrice(side, price),
     bid: research.bid,
-    category: research.category_tag,
     horizonDays: research.horizon_days ?? 0,
     holdToSettle: research.hold_to_settle !== false,
     depth: research.depth_at_limit ?? 0,
@@ -124,14 +150,16 @@ export async function placeOrder({
       decision = assertOpeningEdge({ side, price, research, timeInForce });
       const groupName = research.corr_group;
       const groupExposure = book.byGroup?.[groupName] || 0;
-      kellyDollars = fractionalKellyDollars({
-        p: research.p_model,
-        price: entryPrice(side, price),
-        bankroll: caps.sleeve_dollars,
-        history: book.history,
-        groupAlreadyOpen: groupExposure > 0,
-        drawdown: Number(research.drawdown_from_peak) || 0,
-      });
+      kellyDollars = Math.min(
+        fractionalKellyDollars({
+          p: research.p_model,
+          price: entryPrice(side, price),
+          bankroll: caps.sleeve_dollars,
+          groupAlreadyOpen: groupExposure > 0,
+          drawdown: Number(research.drawdown_from_peak) || 0,
+        }),
+        stakeCapDollars(decision.stake_mode, book.history),
+      );
       if (drawdownBlocks(research)) {
         throw new PolicyError("CAP", "drawdown from peak is at least 40 percent; new risk is halted");
       }
@@ -146,6 +174,8 @@ export async function placeOrder({
         kellyDollars,
         corrGroup: research?.corr_group,
         groupExposure: book.byGroup?.[research?.corr_group] || 0,
+        stakeMode: decision.stake_mode,
+        eventTicker: research?.event_ticker,
       })
       : { ok: true, notional: 0 };
     const body = buildCreateOrderBody({
@@ -173,6 +203,8 @@ export async function placeOrder({
         order,
         edge_net_cents: decision?.edge_net_cents ?? null,
         maker_flag: decision?.maker_flag ?? false,
+        side_exec: decision?.side_exec ?? null,
+        stake_mode: decision?.stake_mode ?? null,
         note: "Sent because KALSHI_SAFE_MODE was off, confirm was true, edge_net cleared the fee dome, and the caps allowed it.",
       };
     } catch (err) {

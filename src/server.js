@@ -38,7 +38,7 @@ function failure(err) {
 export function createServer({ client, env = process.env, ledger = createLedger(), lock = createLock() }) {
   const server = new McpServer({
     name: "kalshi-mcp",
-    version: "1.3.0",
+    version: "1.4.0",
   });
   const mutate = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
   const read = { readOnlyHint: true, destructiveHint: false, openWorldHint: true };
@@ -110,7 +110,7 @@ export function createServer({ client, env = process.env, ledger = createLedger(
 
   server.registerTool("find_best_bets", {
     title: "Find best bets",
-    description: "Read-only scan. Gates on edge_net after the Kalshi fee dome, spread, and depth. Skips taking prices under 15 cents and buying favorites at or above 97 cents for win rate. Prefers a maker when edge is small. Sizes quarter Kelly inside about $2 until Kalshi fill history is profitable, then half Kelly up to the hard max $15, inside 15% of the sleeve, 20% per corr_group, and $10 per day. Does not place orders.",
+    description: "Read-only scan. Gates on edge_net_cents after the Kalshi fee dome, spread, and depth. Skips taking prices at or under 10 cents unless edge is at least 8 cents at a fixed $2, and skips favorites at or above 97 cents. Prefers a maker. Sizes quarter Kelly (λ=0.25) inside stake modes: fixed $2 under 25 cents, modest $2–$8 at or above 50 cents after the sleeve is profitable, hard max $15. Also 15% per market, 30% per corr_group, 40% bankroll, and $10 per day. Does not place orders.",
     annotations: read,
     inputSchema: {
       signals: z.array(signalSchema).min(1).max(40),
@@ -141,7 +141,7 @@ export function createServer({ client, env = process.env, ledger = createLedger(
 
   server.registerTool("review_positions", {
     title: "Review positions",
-    description: "Read-only end-of-day review. Default is hold to settlement. Cut when a falsifier hits or edge_net flips through the exit fee. A deep loss still cuts. Does not place or cancel.",
+    description: "Read-only end-of-day review. Default is hold to settlement. Cut when a falsifier hits or edge_net flips to −2 cents (EXIT_EDGE_GONE). A 1–3 cent mark move without an info change is a hold. A deep loss still cuts. Does not place or cancel.",
     annotations: read,
     inputSchema: {
       positions: z.array(z.object({
@@ -170,7 +170,7 @@ export function createServer({ client, env = process.env, ledger = createLedger(
 
   server.registerTool("place_order", {
     title: "Place order",
-    description: "Place a limit order. Refused while KALSHI_SAFE_MODE is on. Refused unless confirm is true. Opening risk must clear edge_net after the fee dome. Default size is about $2 (quarter Kelly). Hard max is $15 per trade after the sleeve fill history is profitable (half Kelly). Also refused above 15% of the sleeve in one market, 20% in one corr_group, or $10 new notional per UTC day. Small edge must rest as a maker. bid buys YES. ask sells YES. There is no withdraw or deposit tool.",
+    description: "Place a limit order. Refused while KALSHI_SAFE_MODE is on. Refused unless confirm is true. Opening risk must clear edge_net_cents after the fee dome. Prices under 25 cents stay a fixed $2. At or above 50 cents, modest size is $2–$8 after the sleeve is profitable, inside quarter Kelly (λ=0.25) and a hard max of $15. Also refused above 15% of the sleeve in one market, 30% in one corr_group, 40% deployed, 15 open positions, or $10 new notional per UTC day. Small edge must rest as a maker. bid buys YES. ask sells YES. There is no withdraw or deposit tool.",
     annotations: mutate,
     inputSchema: {
       confirm: confirmField,
@@ -217,7 +217,7 @@ export function createServer({ client, env = process.env, ledger = createLedger(
 
   server.registerTool("exit_position", {
     title: "Exit position",
-    description: "Close some or all of one position. Default is hold to settlement. Refused unless a falsifier hit or edge_net flipped through the exit fee, and unless safe mode is off and confirm is true. Does not add risk and does not withdraw funds.",
+    description: "Close some or all of one position. Default is hold to settlement. Refused unless a falsifier hit or edge_net flipped to −2 cents (EXIT_EDGE_GONE), and unless safe mode is off and confirm is true. A 1–3 cent wobble is not an exit. Does not add risk and does not withdraw funds.",
     annotations: mutate,
     inputSchema: {
       confirm: confirmField,

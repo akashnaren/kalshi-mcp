@@ -7,7 +7,9 @@
 
 import {
   CATEGORIES,
+  VOLUME_FLOOR_DOLLARS,
   evaluateEntry,
+  feeDomeCents,
   horizonFromClose,
   isFeeBlind,
 } from "./edge.js";
@@ -308,7 +310,9 @@ export function rankMarkets(markets, signals, filters) {
     ambiguous_settlement: 0,
     fee_blind: 0,
     research_conflict: 0,
+    yes_no_replicate: 0,
   };
+  const eventLegs = new Map();
   const examples = [];
   const note = (ticker, reason) => {
     skipped[reason] += 1;
@@ -318,6 +322,7 @@ export function rankMarkets(markets, signals, filters) {
   const recommendations = [];
   for (const market of markets) {
     const ticker = market?.ticker ?? "";
+    noteYesLeg(eventLegs, market);
     if (market?.status && !TRADABLE.has(market.status)) {
       note(ticker, "inactive");
       continue;
@@ -431,10 +436,20 @@ export function rankMarkets(markets, signals, filters) {
       hold_to_settle: true,
       horizon_days: horizonDays,
       category_tag: research.category_tag,
+      category_edge: "log_only",
       corr_group: research.corr_group,
       model_sources: research.model_sources,
       settlement_match_score: research.settlement_match_score,
       falsifier: research.falsifier,
+      side_exec: decision.side_exec,
+      stake_mode: decision.stake_mode,
+      kelly_frac: decision.kelly_frac,
+      edge_after_fees: decision.edge_net_cents,
+      hold_to_res_default: decision.hold_to_res_default,
+      days_to_res: horizonDays,
+      days_to_res_prefer: decision.days_to_res_prefer,
+      yes_no_replicate: "clear",
+      volume_floor_ok: dollarVolume(market, quote) >= VOLUME_FLOOR_DOLLARS,
       close_time: market.close_time ?? null,
       liquidity: {
         volume_24h: volume,
@@ -445,13 +460,65 @@ export function rankMarkets(markets, signals, filters) {
     });
   }
 
-  recommendations.sort((a, b) => {
+  const kept = applyYesNoReplicate(recommendations, eventLegs, note);
+  kept.sort((a, b) => {
     if (b.edge_net_cents !== a.edge_net_cents) return b.edge_net_cents - a.edge_net_cents;
+    if (a.volume_floor_ok !== b.volume_floor_ok) return a.volume_floor_ok ? -1 : 1;
     if (a.stake !== b.stake) return a.stake - b.stake;
     return a.ticker < b.ticker ? -1 : a.ticker > b.ticker ? 1 : 0;
   });
 
-  return { recommendations, skipped, examples };
+  return { recommendations: kept, skipped, examples };
+}
+
+function noteYesLeg(eventLegs, market) {
+  const event = market?.event_ticker;
+  if (!event || market?.market_type && market.market_type !== "binary") return;
+  const bid = readDollars(market, "yes_bid_dollars", "yes_bid");
+  const ask = readDollars(market, "yes_ask_dollars", "yes_ask");
+  if (!(bid > 0) || !(ask > 0) || !(ask < 1)) return;
+  const mid = (bid + ask) / 2;
+  const legs = eventLegs.get(event) ?? [];
+  if (!legs.some((leg) => leg.ticker === market.ticker)) {
+    legs.push({ ticker: market.ticker, mid, fee: feeDomeCents(mid, 1) / 100 });
+    eventLegs.set(event, legs);
+  }
+}
+
+function applyYesNoReplicate(recommendations, eventLegs, note) {
+  const dominated = new Set();
+  const cheaper = new Set();
+  for (const legs of eventLegs.values()) {
+    if (legs.length < 2) continue;
+    const sumMid = legs.reduce((sum, leg) => sum + leg.mid, 0);
+    const sumFee = legs.reduce((sum, leg) => sum + leg.fee, 0);
+    if (!(sumMid > 1 + sumFee)) continue;
+    const best = legs.reduce((left, right) => (left.mid <= right.mid ? left : right));
+    cheaper.add(best.ticker);
+    for (const leg of legs) {
+      if (leg.ticker !== best.ticker) dominated.add(leg.ticker);
+    }
+  }
+  const kept = [];
+  for (const row of recommendations) {
+    if (row.side === "yes" && dominated.has(row.ticker)) {
+      note(row.ticker, "yes_no_replicate");
+      continue;
+    }
+    kept.push({
+      ...row,
+      yes_no_replicate: row.side === "yes" && cheaper.has(row.ticker) ? "cheaper_leg" : "clear",
+    });
+  }
+  return kept;
+}
+
+function dollarVolume(market, quote) {
+  const lifetime = readCount(market, "volume_fp", "volume");
+  const day = readCount(market, "volume_24h_fp", "volume_24h");
+  const contracts = lifetime ?? day ?? 0;
+  const mid = quote.bid > 0 ? (quote.bid + quote.ask) / 2 : quote.ask;
+  return round4(contracts * mid);
 }
 
 function quoteForSide(market, side) {
@@ -511,22 +578,36 @@ function laneRank(lane) {
 export function policySummary(filters) {
   return {
     name: "akash_finance_engineer",
-    prefer: "edge_net after fee dome, spread, and depth; maker when that edge is small; hold to settlement",
+    prefer: "edge_net_cents after fee dome, spread, and depth; maker when that edge is small; hold to settlement. Prior: Bürgi, Deng, and Whelan, https://www.karlwhelan.com/Papers/Kalshi.pdf",
     score: "edge_net_cents",
     fee_dome: "ceil_cent(0.07 * contracts * price * (1 - price))",
-    size: "quarter Kelly until sleeve fills are profitable, then half Kelly, inside the caps",
+    size: "quarter Kelly (λ=0.25) inside stake_mode caps; half Kelly only with an explicit OOS calibration log",
+    kelly_frac: 0.25,
+    bankroll_util_max: 0.4,
+    max_open_positions: 15,
+    category_edge: "log_only",
+    cross_venue_lead: "optional; do not auto-arb",
     payout: "profit if that side wins (notional minus the ask)",
     stake: "ask paid to enter, in dollars",
     confidence_min_applied: filters.min_confidence,
     requires_named_indicator_keys: true,
     named_indicators: [
-      "edge_net",
+      "edge_net_cents",
       "flb_band",
+      "side_exec",
+      "yes_no_replicate",
+      "kelly_frac",
+      "stake_mode",
+      "bankroll_util",
+      "spread_rel",
+      "volume_floor",
       "horizon_days",
       "category_tag",
       "corr_group",
       "model_sources",
       "settlement_match_score",
+      "hold_to_res_default",
+      "exit_edge_gone",
     ],
     polymarket_is_not_kalshi: true,
     auto_trade: true,

@@ -21,9 +21,9 @@ test("defaults match the starter sleeve and the ceiling cannot be raised", () =>
   assert.equal(loaded.default_dollars_per_trade, CAP_DEFAULTS.default_dollars_per_trade);
   assert.equal(loaded.max_dollars_per_trade, HARD_TRADE_CEILING);
   assert.equal(loaded.max_sleeve_fraction, 0.15);
-  assert.equal(loaded.max_group_fraction, 0.2);
+  assert.equal(loaded.max_group_fraction, 0.3);
   assert.equal(loaded.max_daily_notional, 10);
-  assert.equal(loadCaps({ KALSHI_MAX_GROUP_FRACTION: "0.5" }).max_group_fraction, 0.2);
+  assert.equal(loadCaps({ KALSHI_MAX_GROUP_FRACTION: "0.5" }).max_group_fraction, 0.3);
   assert.equal(loadCaps({ KALSHI_MAX_DOLLARS_PER_TRADE: "100" }).max_dollars_per_trade, 15);
   assert.equal(loadCaps({ KALSHI_MAX_DOLLARS_PER_TRADE: "nope" }).max_dollars_per_trade, 15);
   assert.equal(loadCaps({ KALSHI_MAX_DOLLARS_PER_TRADE: "8" }).max_dollars_per_trade, 8);
@@ -105,17 +105,49 @@ test("quarter Kelly stays near $2 until history is profitable, then half Kelly c
   assert.equal(crowded.unsized[0].blocked_by, "market_cap");
 });
 
-test("one corr_group shares a cap even when the tickers differ", () => {
+test("one corr_group shares a 30 percent cap even when the tickers differ", () => {
   const wideDay = loadCaps({ KALSHI_MAX_DAILY_NOTIONAL: "40" });
   const ideas = [];
-  for (let i = 0; i < 8; i += 1) {
+  for (let i = 0; i < 12; i += 1) {
     ideas.push({ ticker: `G${i}`, stake: 0.5, confidence: 0.9, corr_group: "us_election_2026", depth_at_limit: 80 });
   }
   const sized = sizeIdeas(ideas, { caps: wideDay, dailyNotional: 0 });
   const spent = sized.recommendations.reduce((sum, row) => sum + row.suggested_dollars, 0);
-  assert.ok(spent <= 14.2);
-  assert.equal(sized.recommendations[7].suggested_dollars <= 0.2, true);
-  assert.equal(sized.unsized.length, 0);
+  assert.ok(spent <= 21.3);
+  assert.equal(sized.unsized.some((row) => row.blocked_by === "corr_group"), true);
+});
+
+test("bankroll stays at 40 percent, one event stays near 20 percent, and the book stops at 15 names", () => {
+  const wideDay = loadCaps({ KALSHI_MAX_DAILY_NOTIONAL: "40" });
+  const locked = sizeIdeas(
+    [{ ticker: "NEW", stake: 0.5, confidence: 0.9, corr_group: "fed_path", depth_at_limit: 80 }],
+    { caps: wideDay, marketExposure: { LOCK: 28.4 }, dailyNotional: 0 },
+  );
+  assert.equal(locked.unsized[0].blocked_by, "bankroll_util");
+
+  const eventIdeas = [];
+  for (let i = 0; i < 9; i += 1) {
+    eventIdeas.push({
+      ticker: `E${i}`,
+      event_ticker: "SAME-EVENT",
+      stake: 0.5,
+      confidence: 0.9,
+      corr_group: `driver_${i}`,
+      depth_at_limit: 80,
+    });
+  }
+  const eventSized = sizeIdeas(eventIdeas, { caps: wideDay, dailyNotional: 0 });
+  const eventSpent = eventSized.recommendations.reduce((sum, row) => sum + row.suggested_dollars, 0);
+  assert.ok(eventSpent <= 14.2);
+  assert.equal(eventSized.unsized.some((row) => row.blocked_by === "max_per_event"), true);
+
+  const open = {};
+  for (let i = 0; i < 15; i += 1) open[`OPEN${i}`] = 1;
+  const full = sizeIdeas(
+    [{ ticker: "SIXTEENTH", stake: 0.5, confidence: 0.9, corr_group: "fresh_driver", depth_at_limit: 80 }],
+    { caps: wideDay, marketExposure: open, dailyNotional: 0 },
+  );
+  assert.equal(full.unsized[0].blocked_by, "open_positions");
 });
 
 test("win history scales only after three closes and a positive net", () => {
@@ -175,6 +207,11 @@ test("review marks take profit, cut, and hold", () => {
     { ticker: "FLIP", cost: 1, mark: 1.1, edge_net_cents: -4, fee_exit_cents: 2 },
   ], rules);
   assert.deepEqual(falsified.map((row) => row.action), ["cut", "cut"]);
+  const noise = reviewPositions([
+    { ticker: "NOISE", cost: 1, mark: 0.99, edge_net_cents: -1 },
+    { ticker: "GONE", cost: 1, mark: 1.1, edge_net_cents: -2 },
+  ], rules);
+  assert.deepEqual(noise.map((row) => row.action), ["hold", "cut"]);
 });
 
 test("the ledger does not double count an order the book already has", () => {
