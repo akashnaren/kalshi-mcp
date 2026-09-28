@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from kalshi_readonly.guard import safe_mode_enabled
+from kalshi_readonly.http import RateLimitedError
 from kalshi_readonly.recommend import DO_NOT_PLACE, find_best_bets, recommend_from_records
 from kalshi_readonly.recommend import main as recommend_main
 from kalshi_readonly.score import score_formula
@@ -168,6 +170,109 @@ def test_find_best_bets_is_a_read_while_safe_mode_defaults_on(monkeypatch: pytes
     assert "place_order" not in names
     tool = next(item for item in registered_tools() if item["name"] == "find_best_bets")
     assert "does not place" in tool["description"].lower()
+
+
+def test_scan_defaults_to_one_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _patch_markets(monkeypatch, cursor="more")
+    out = find_best_bets({}, now=NOW)
+    assert len(calls) == 1
+    assert calls[0]["limit"] == 100
+    assert "cursor" not in calls[0]
+    assert out["filters"]["max_pages"] == 1
+    assert out["rate_limited"] is False
+    assert out["places_orders"] is False
+    assert out["recommendations"] == []
+
+
+def test_later_page_rate_limit_returns_partial_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"now": 1000.0}
+    monkeypatch.setattr("kalshi_readonly.markets.time.monotonic", lambda: clock["now"])
+    calls: list[dict] = []
+
+    def fake_public_get(path: str, query: dict | None = None):
+        calls.append(dict(query or {}))
+        if len(calls) % 2 == 0:
+            raise RateLimitedError("rate_limited: Kalshi GET /markets failed: 429")
+        ticker = f"M{len(calls)}"
+        return {"markets": [_market(ticker, yes_ask="0.2000", close="2026-10-02T15:00:00Z")], "cursor": "more"}
+
+    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    first = find_best_bets({"max_pages": 2, "page_size": 50}, now=NOW)
+    assert first["rate_limited"] is True
+    assert first["places_orders"] is False
+    assert first["recommendations"] == []
+    assert first["pages_fetched"] == 1
+    assert [row["ticker"] for row in first["research_queue"]] == ["M1"]
+    assert len(calls) == 2
+
+    clock["now"] = 1059.0
+    second = find_best_bets({"max_pages": 2, "page_size": 50}, now=NOW)
+    assert second["cache"] == "hit"
+    assert second["rate_limited"] is True
+    assert second["requests"] == 0
+    assert len(calls) == 2
+
+    clock["now"] = 1060.0
+    third = find_best_bets({"max_pages": 2, "page_size": 50}, now=NOW)
+    assert third["cache"] == "miss"
+    assert third["rate_limited"] is True
+    assert [row["ticker"] for row in third["research_queue"]] == ["M3"]
+
+
+def test_first_page_rate_limit_fails_the_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_public_get(path: str, query: dict | None = None):
+        raise RateLimitedError("rate_limited: Kalshi GET /markets failed: 429")
+
+    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    with pytest.raises(RateLimitedError, match="^rate_limited:"):
+        find_best_bets({"max_pages": 2, "page_size": 50}, now=NOW)
+
+
+def test_concurrent_scans_share_one_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kalshi_readonly.markets as markets
+
+    leader_in = threading.Event()
+    follower_waiting = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+
+    class _WaitingEvent(threading.Event):
+        def wait(self, timeout=None):
+            follower_waiting.set()
+            return super().wait(timeout)
+
+    monkeypatch.setattr(markets, "_new_event", _WaitingEvent)
+
+    def fake_public_get(path: str, query: dict | None = None):
+        calls.append(1)
+        leader_in.set()
+        assert release.wait(3)
+        return {"markets": [_market("ONLY", yes_ask="0.2000", close="2026-10-02T15:00:00Z")], "cursor": ""}
+
+    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    buckets: list[list] = [[], []]
+
+    def run(index: int) -> None:
+        try:
+            buckets[index].append(find_best_bets({"max_pages": 1, "page_size": 50}, now=NOW))
+        except Exception as exc:  # noqa: BLE001
+            buckets[index].append(exc)
+
+    first = threading.Thread(target=run, args=(0,))
+    second = threading.Thread(target=run, args=(1,))
+    first.start()
+    assert leader_in.wait(3)
+    second.start()
+    assert follower_waiting.wait(3)
+    release.set()
+    first.join(3)
+    second.join(3)
+    assert calls == [1]
+    assert all(len(bucket) == 1 and not isinstance(bucket[0], Exception) for bucket in buckets)
+    assert {bucket[0]["cache"] for bucket in buckets} == {"miss", "hit"}
+    assert all(bucket[0]["rate_limited"] is False for bucket in buckets)
+    assert all(bucket[0]["research_queue"][0]["ticker"] == "ONLY" for bucket in buckets)
+    assert sum(bucket[0]["requests"] for bucket in buckets) == 1
 
 
 def test_find_best_bets_stops_at_max_pages_and_reuses_cache(monkeypatch: pytest.MonkeyPatch) -> None:

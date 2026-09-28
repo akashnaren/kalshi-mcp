@@ -17,12 +17,27 @@ function toolList(response: WorkerResponse): { name: string; description?: strin
   });
 }
 
+function safeText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("PRIVATE KEY") || message.includes("-----BEGIN") ? "Kalshi request failed" : message;
+}
+
 async function main(): Promise<void> {
   const bridge = new PythonBridge(repoRoot());
-  const listed = await bridge.request({ op: "list" }, 20_000);
-  const server = createServer(bridge, toolList(listed));
+  // Answer MCP initialize before the Python worker finishes tools/list.
+  // A host that restarts and then times out waiting for that list reports
+  // Not connected even though this process is up.
+  const ready = bridge.request({ op: "list" }, 20_000).then((response) => {
+    const tools = toolList(response);
+    const names = tools.map((tool) => tool.name).join(",");
+    console.error(`kalshi-readonly node safeMode=${safeModeOn() ? "on" : "off"} tools=${names}`);
+    return tools;
+  });
+  ready.catch((error: unknown) => {
+    console.error(`kalshi-readonly node safeMode=${safeModeOn() ? "on" : "off"} tools=unavailable: ${safeText(error)}`);
+  });
+  const server = createServer(bridge, ready);
   await server.connect(new StdioServerTransport());
-  console.error(`kalshi-readonly node safeMode=${safeModeOn() ? "on" : "off"}`);
 }
 
 main().catch((error: unknown) => {

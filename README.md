@@ -1,8 +1,8 @@
 # kalshi-readonly
 
-Kalshi Trade API v2 MCP over stdio. Read tools cover exchange status, markets, cash, positions, and a ranked list of small-stake ideas. Trade tools place, cancel, amend, or decrease one order, and list resting orders.
+Kalshi Trade API v2 MCP over stdio (`kalshi-mcp-v1-readonly-fleet`). Read tools cover exchange status, markets, cash, positions, and a ranked list of small-stake ideas. Trade tools place, cancel, amend, or decrease one order. They are gated behind `KALSHI_SAFE_MODE`. They are not absent from v1.
 
-House default is read-only. Mutating trade tools stay off unless safe mode is turned off. There is no deposit tool, no withdraw tool, and no auto-trading tool. `find_best_bets` never places an order.
+Fleet default is `KALSHI_SAFE_MODE=1`. `tools/list` then omits `place_order`, `cancel_order`, `amend_order`, and `decrease_order`, and those handlers still refuse the call. The Finance Engineer harness (`harness/SKILL.md`) is the only policy that sets `KALSHI_SAFE_MODE=0`, and only on the Finance Engineer host. There is no separate Kalshi role harness. There is no deposit tool, no withdraw tool, and no auto-trading tool. `find_best_bets` never places an order.
 
 ## Run
 
@@ -26,8 +26,9 @@ Copy `.env.example`. Portfolio and order calls need a key id and a private key. 
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `KALSHI_API_KEY_ID` | portfolio and trade calls | API key id |
-| `KALSHI_PRIVATE_KEY_PATH` | one of these | PEM file path |
+| `KALSHI_API_KEY_ID` | portfolio and trade calls | API key id. Or set `KALSHI_API_KEY_ID_PATH` |
+| `KALSHI_API_KEY_ID_PATH` | alternative to the key id | File containing the key id. If both id env vars are unset, `~/.secrets/kalshi/key_id` is used when that file exists |
+| `KALSHI_PRIVATE_KEY_PATH` | one of these | PEM file path. If PEM env vars are unset, `~/.secrets/kalshi/private.pem` is used when that file exists |
 | `KALSHI_PRIVATE_KEY_PEM` | one of these | PEM contents |
 | `KALSHI_API_BASE` | no | Default `https://api.elections.kalshi.com/trade-api/v2` |
 | `KALSHI_SAFE_MODE` | no | Defaults to on. See Trade. |
@@ -38,13 +39,22 @@ Signing matches the cash CLI for GET, POST, and DELETE: `timestamp_ms + METHOD +
 
 ## Prove
 
-Point the env vars at the key id file and the PEM. This prints one balance read and does not place orders.
+No-network fleet check. The printed names must include `exchange_status`, `cash_or_positions`, `find_best_bets`, and `fe_routine`, and must omit `place_order`, `cancel_order`, `amend_order`, and `decrease_order`.
+
+```bash
+KALSHI_SAFE_MODE=1 python3 -c 'from kalshi_readonly.tools import registered_tools; print([t["name"] for t in registered_tools()])'
+printf '%s\n' '{"id":1,"op":"list"}' | KALSHI_SAFE_MODE=1 python3 -m kalshi_readonly.dispatch
+```
+
+On the box, after the host is up: call `exchange_status`, then `cash_or_positions` with `include=both`. The same cash read from the CLI, which does not place:
 
 ```bash
 export KALSHI_API_KEY_ID="$(tr -d '[:space:]' < /path/to/key_id)"
 export KALSHI_PRIVATE_KEY_PATH=/path/to/private.pem
 python3 -c 'import json; from kalshi_readonly.tools import cash_or_positions; print(json.dumps(cash_or_positions({"include":"both","limit":5}), indent=2))'
 ```
+
+`~/.secrets/kalshi/key_id` and `private.pem` are enough when those env vars are unset. A host that says Not connected needs `npm run build` and a restart so `node dist/index.js` is the live process. Then `tools/list` is the check.
 
 ## Install as a Cursor plugin
 
@@ -69,12 +79,36 @@ node /absolute/path/to/kalshi-mcp/dist/index.js
 
 Set these in the host env, not on the command line:
 
-- `KALSHI_API_KEY_ID`
-- `KALSHI_PRIVATE_KEY_PATH`
-- `KALSHI_SAFE_MODE=1` for a read-only host
-- `KALSHI_SAFE_MODE=0` for the Finance Engineer sleeve, after install
+- `KALSHI_API_KEY_ID` or `KALSHI_API_KEY_ID_PATH` (default `~/.secrets/kalshi/key_id`)
+- `KALSHI_PRIVATE_KEY_PATH` or `KALSHI_PRIVATE_KEY_PEM` (default `~/.secrets/kalshi/private.pem`)
+- `KALSHI_SAFE_MODE=1` on every fleet host
 
-`KALSHI_SAFE_MODE=1` is the house default. Order tools stay unregistered. `find_best_bets` only reads. Do not commit the key file.
+`KALSHI_SAFE_MODE=1` is the fleet default. Missing or empty stays on. `tools/list` omits `place_order`, `cancel_order`, `amend_order`, and `decrease_order`. `find_best_bets` only reads. Do not commit the key file.
+
+```json
+{
+  "mcpServers": {
+    "kalshi-readonly": {
+      "command": "node",
+      "args": ["/absolute/path/to/kalshi-mcp/dist/index.js"],
+      "env": {
+        "KALSHI_API_KEY_ID_PATH": "/absolute/path/to/.secrets/kalshi/key_id",
+        "KALSHI_PRIVATE_KEY_PATH": "/absolute/path/to/.secrets/kalshi/private.pem",
+        "KALSHI_SAFE_MODE": "1"
+      }
+    }
+  }
+}
+```
+
+Omit the path env vars when `~/.secrets/kalshi/key_id` and `private.pem` already exist for that user. Do not commit those files.
+
+Finance Engineer override, and only that host. `harness/SKILL.md` owns the decision. Do not add a second Kalshi role harness. Install, in order:
+
+1. `npm run build` so `dist/index.js` matches this tree.
+2. Point the host at `node /absolute/path/to/kalshi-mcp/dist/index.js` with `KALSHI_SAFE_MODE=0`.
+3. Restart the host. The Node process answers MCP `initialize` before the Python worker finishes `tools/list`, then `tools/list` waits for that list. The list is fixed for the life of the process (`listChanged` is false). A restart that leaves no live `dist/index.js` shows up as Not connected. Rebuild and restart so the host spawns the process again.
+4. Prove the new process with `tools/list`. It must include `fe_routine`, `find_best_bets`, `place_order`, `cancel_order`, `amend_order`, and `decrease_order`. stderr from the entry includes `safeMode=off` and those names. `exchange_status` is the cheap public call that the worker can reach Kalshi. It does not place.
 
 The Finance Engineer sleeve sets `KALSHI_SAFE_MODE=0` and restarts the host. `place_order`, `cancel_order`, `amend_order`, and `decrease_order` then show up. Every one of those calls still needs `confirm: true`. Opening risk still has to fit the caps: about $2 until Kalshi fill history shows the sleeve is profitable, hard max $15, at most 15% of the sleeve in one market, and at most 30% in one `corr_group`. There is no withdraw tool and no deposit tool. The daily and end-of-day prompt is `fe_routine` and `harness/fe-grok-bot-routine.md`.
 
@@ -94,7 +128,7 @@ The Finance Engineer sleeve sets `KALSHI_SAFE_MODE=0` and restarts the host. `pl
 }
 ```
 
-Use `"KALSHI_SAFE_MODE": "1"` when this host should stay read-only. `"0"` is only for the Finance Engineer sleeve. Restart after you change it so the tool list reloads.
+`"KALSHI_SAFE_MODE": "0"` in the block above is the Finance Engineer host only. Every other host stays at `"1"`. Restart after you change it so the tool list reloads. `listChanged` stays false for the life of the process.
 
 ## Cursor
 
@@ -122,7 +156,7 @@ Use `"KALSHI_SAFE_MODE": "1"` when this host should stay read-only. `"0"` is onl
 | --- | --- |
 | `exchange_status` | Public exchange status |
 | `list_markets` | Public markets. Optional `limit` (default 5), `status`, `ticker` |
-| `find_best_bets` | Read-only rank. See Bets. Does not place orders. Rows include `edge_net_cents`, `flb_band`, `kelly_frac`, and `stake_mode` |
+| `find_best_bets` | Read-only rank. See Bets. Does not place orders. Rows include `edge_net_cents`, `flb_band`, `kelly_frac`, and `stake_mode`. `rate_limited` is true when a later scan page hit the retry budget |
 | `fe_routine` | Daily and end-of-day prompt for the Finance Engineer. Does not trade |
 | `cash_or_positions` | Cash and positions. `include`: `balance`, `cash`, `positions`, `both` (default), or `fills`. Optional `limit` (default 50) |
 | `list_open_orders` | Resting orders only (`status=resting`). Optional `ticker`, `limit` (default 100), `cursor`, `subaccount`. Read. No confirm |
@@ -153,11 +187,15 @@ Defaults, all overridable inside a fixed range:
 | `min_ask_size` | 1 | 0 to 100000 |
 | `min_hours_to_expiry` | 2 | 0 to 168 |
 | `max_hours_to_expiry` | 1440 (60 days) | above the minimum, up to 8760 |
-| `max_pages` | 2 | 1 to 4 |
+| `max_pages` | 1 | 1 to 4 |
 | `page_size` | 100 | 1 to 200 |
 | `limit` | 5 rows | 1 to 10 |
 
-Prices at or above 0.85 are never recommended. The scan also skips multivariate combos (`mve_filter=exclude`) so a page is not spent on them. A successful list is cached for about 45 seconds in the process. The Node entry keeps that process alive across tool calls.
+Prices at or above 0.85 are never recommended. The scan also skips multivariate combos (`mve_filter=exclude`) so a page is not spent on them. Public `GET /markets` counts against the same IP budget as signed calls, so the default scan is one page. A successful list is cached for about 5 minutes in the process. Concurrent scans of the same page share one in-flight request. The Node entry keeps that process alive across tool calls.
+
+`rate_limited` is false on a normal read. If a later scan page still gets HTTP 429 or 503 after the retry budget, the tool returns the pages already fetched, sets `rate_limited` to true, and does not place. That partial list is reused for about 60 seconds. A rate limit on the first page fails the tool with an error that starts with `rate_limited`. Do not scan again immediately.
+
+HTTP 429 and 503 are tried at most 3 times. A `Retry-After` value is honored up to 3 seconds. Without that header, or when it is not a delay or a date, the wait is a short exponential backoff with jitter (0.25s, then 0.5s, capped at 3 seconds). The error is `rate_limited` only after that budget is spent.
 
 Every response includes `places_orders: false` and the sentence `do not place until Akash names the trade`. Each ranked row also reports `edge_net_cents` after the fee dome (`ceil(0.07 * contracts * price * (1 - price))` cents), `flb_band`, `kelly_frac` of 0.25, and `stake_mode`. A price at or under 10 cents is skipped unless that net edge is at least 8 cents. The rank score itself is unchanged. The Finance Engineer routine is `fe_routine` and `harness/fe-grok-bot-routine.md`.
 
@@ -181,7 +219,7 @@ Cancels and decreases do not add risk and are not size-capped. An amend that wou
 - Calling one of those handlers anyway returns an error and does not hit the network.
 - `list_open_orders` stays registered. It is a signed GET of resting orders.
 
-After you set `KALSHI_SAFE_MODE=0`, restart the MCP host so it reloads the tool list. Every mutating call still requires `confirm` to be the boolean `true`. `false`, `"true"`, `1`, and a missing confirm are refused before auth and before HTTP. The confirm flag is not copied into the Kalshi body.
+The Finance Engineer harness is the only unlock. After that host sets `KALSHI_SAFE_MODE=0`, restart it so `tools/list` reloads. Every mutating call still requires `confirm` to be the boolean `true`. `false`, `"true"`, `1`, and a missing confirm are refused before auth and before HTTP. The confirm flag is not copied into the Kalshi body. Fleet hosts do not set `0`.
 
 | Tool | Kalshi route | Required arguments |
 | --- | --- | --- |

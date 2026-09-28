@@ -1,14 +1,22 @@
-"""Bounded public market reads. One list call per page. Beliefs are one batched call."""
+"""Bounded public market reads. One list call per page. Beliefs are one batched call.
+
+Scan pages share one in-flight request so concurrent find_best_bets calls do
+not stampede GET /markets. A later page that is rate limited keeps the pages
+already fetched.
+"""
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 
-from kalshi_readonly.http import public_get
+from kalshi_readonly.http import RateLimitedError, public_get
 
-_TTL_SECONDS = 45.0
+_TTL_SECONDS = 300.0
+_PARTIAL_TTL_SECONDS = 60.0
 _CACHE_CAP = 8
+_FLIGHT_WAIT_SECONDS = 75.0
 _KEEP = (
     "ticker",
     "event_ticker",
@@ -38,7 +46,8 @@ _KEEP = (
     "notional_value_dollars",
 )
 
-_cache: dict[str, tuple[float, list[dict], int]] = {}
+_cache: dict[str, tuple[float, list[dict], int, bool]] = {}
+_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -47,6 +56,21 @@ class Loaded:
     pages: int
     requests: int
     cache: str
+    rate_limited: bool = False
+
+
+@dataclass
+class _Flight:
+    event: threading.Event
+    result: Loaded | None = None
+    error: BaseException | None = None
+
+
+_flights: dict[str, _Flight] = {}
+
+
+def _new_event() -> threading.Event:
+    return threading.Event()
 
 
 def clear_market_cache() -> None:
@@ -74,7 +98,7 @@ def _rows(data: dict) -> list[dict]:
     return markets
 
 
-def _scan(max_pages: int, page_size: int) -> tuple[list[dict], int, int]:
+def _scan(max_pages: int, page_size: int) -> tuple[list[dict], int, int, bool]:
     markets: list[dict] = []
     seen: set[str] = set()
     pages = 0
@@ -88,7 +112,12 @@ def _scan(max_pages: int, page_size: int) -> tuple[list[dict], int, int]:
         }
         if cursor:
             query["cursor"] = cursor
-        data = public_get("/markets", query)
+        try:
+            data = public_get("/markets", query)
+        except RateLimitedError:
+            if pages == 0:
+                raise
+            return markets, pages, requests, True
         requests += 1
         pages += 1
         for row in _rows(data):
@@ -100,7 +129,7 @@ def _scan(max_pages: int, page_size: int) -> tuple[list[dict], int, int]:
         if not isinstance(raw_cursor, str) or not raw_cursor:
             break
         cursor = raw_cursor
-    return markets, pages, requests
+    return markets, pages, requests, False
 
 
 def _by_tickers(tickers: list[str]) -> tuple[list[dict], int, int]:
@@ -110,22 +139,84 @@ def _by_tickers(tickers: list[str]) -> tuple[list[dict], int, int]:
     return _rows(data), 1, 1
 
 
+def _lookup(key: str) -> Loaded | None:
+    hit = _cache.get(key)
+    if hit is None or hit[0] <= time.monotonic():
+        return None
+    return Loaded(markets=list(hit[1]), pages=hit[2], requests=0, cache="hit", rate_limited=hit[3])
+
+
+def _store(key: str, markets: list[dict], pages: int, rate_limited: bool) -> None:
+    ttl = _PARTIAL_TTL_SECONDS if rate_limited else _TTL_SECONDS
+    _cache[key] = (time.monotonic() + ttl, markets, pages, rate_limited)
+    if len(_cache) > _CACHE_CAP:
+        oldest = min(_cache, key=lambda item: _cache[item][0])
+        if oldest != key:
+            _cache.pop(oldest, None)
+
+
+def _copy(loaded: Loaded, *, cache: str, requests: int) -> Loaded:
+    return Loaded(
+        markets=list(loaded.markets),
+        pages=loaded.pages,
+        requests=requests,
+        cache=cache,
+        rate_limited=loaded.rate_limited,
+    )
+
+
+def _fetch(key: str, *, tickers: list[str] | None, max_pages: int, page_size: int, scan: bool) -> Loaded:
+    if scan:
+        markets, pages, requests, rate_limited = _scan(max_pages, page_size)
+    else:
+        markets, pages, requests = _by_tickers(list(tickers or []))
+        rate_limited = False
+    _store(key, markets, pages, rate_limited)
+    return Loaded(
+        markets=list(markets),
+        pages=pages,
+        requests=requests,
+        cache="miss",
+        rate_limited=rate_limited,
+    )
+
+
 def load_markets(*, tickers: list[str] | None, max_pages: int, page_size: int, scan: bool) -> Loaded:
     if scan:
         key = f"scan|{page_size}|{max_pages}"
     else:
         key = "tickers|" + ",".join(tickers or [])
-    now = time.monotonic()
-    hit = _cache.get(key)
-    if hit is not None and hit[0] > now:
-        return Loaded(markets=list(hit[1]), pages=hit[2], requests=0, cache="hit")
-    if scan:
-        markets, pages, requests = _scan(max_pages, page_size)
-    else:
-        markets, pages, requests = _by_tickers(list(tickers or []))
-    _cache[key] = (now + _TTL_SECONDS, markets, pages)
-    if len(_cache) > _CACHE_CAP:
-        oldest = min(_cache, key=lambda item: _cache[item][0])
-        if oldest != key:
-            _cache.pop(oldest, None)
-    return Loaded(markets=list(markets), pages=pages, requests=requests, cache="miss")
+    cached = _lookup(key)
+    if cached is not None:
+        return cached
+    with _lock:
+        cached = _lookup(key)
+        if cached is not None:
+            return cached
+        flight = _flights.get(key)
+        if flight is None:
+            flight = _Flight(event=_new_event())
+            _flights[key] = flight
+            leader = True
+        else:
+            leader = False
+    if not leader:
+        if not flight.event.wait(_FLIGHT_WAIT_SECONDS):
+            raise RuntimeError("market scan timed out waiting for in-flight request")
+        if flight.error is not None:
+            raise flight.error
+        if flight.result is None:
+            raise RuntimeError("market scan failed")
+        return _copy(flight.result, cache="hit", requests=0)
+    try:
+        loaded = _fetch(key, tickers=tickers, max_pages=max_pages, page_size=page_size, scan=scan)
+        flight.result = loaded
+        return loaded
+    except BaseException as exc:
+        flight.error = exc
+        raise
+    finally:
+        with _lock:
+            if _flights.get(key) is flight:
+                _flights.pop(key, None)
+        flight.event.set()

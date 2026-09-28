@@ -42,6 +42,7 @@ def _envelope(
     cache: str,
     pages: int,
     requests: int,
+    rate_limited: bool = False,
 ) -> dict:
     return {
         "places_orders": False,
@@ -51,6 +52,7 @@ def _envelope(
         "cache": cache,
         "pages_fetched": pages,
         "requests": requests,
+        "rate_limited": rate_limited,
         "scanned": counts.get("scanned", 0),
         "filters": filters_payload(options),
         "recommendations": [_drop_empty(row) for row in recommendations],
@@ -100,6 +102,7 @@ def find_best_bets(args: dict | None = None, *, now: datetime | None = None) -> 
         cache=loaded.cache,
         pages=loaded.pages,
         requests=loaded.requests,
+        rate_limited=loaded.rate_limited,
     )
 
 
@@ -165,6 +168,7 @@ FIND_BEST_TOOL = {
         "Prefers a small stake and a high payout when confidence in that yes or no side is high. "
         "Pass beliefs with ticker, side (yes or no), confidence, and optional evidence. "
         "Without beliefs, returns a short research queue and no recommendations. "
+        "A later scan page that is rate limited sets rate_limited true and keeps pages already fetched. "
         "Does not place, cancel, amend, or decrease. "
         "do not place until Akash names the trade."
     ),
@@ -185,7 +189,7 @@ FIND_BEST_TOOL = {
                     "required": ["ticker", "side", "confidence"],
                 },
             },
-            "max_pages": {"type": "integer", "description": "Scan pages when beliefs are omitted. 1 to 4. Default 2."},
+            "max_pages": {"type": "integer", "description": "Scan pages when beliefs are omitted. 1 to 4. Default 1."},
             "page_size": {"type": "integer", "description": "Markets per scan page. 1 to 200. Default 100."},
             "min_volume": {"type": "number", "description": "Minimum 24h volume in contracts. Default 20."},
             "min_ask_size": {"type": "number", "description": "Minimum displayed size at the ask. Default 1."},

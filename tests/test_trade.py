@@ -214,9 +214,11 @@ def test_safe_mode_refuses_even_when_confirm_is_true(monkeypatch: pytest.MonkeyP
         assert str(caught.value) == SAFE_MODE_ERROR
 
 
-def test_missing_auth_fails_closed_before_place(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_auth_fails_closed_before_place(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     _enable_trading(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("KALSHI_API_KEY_ID", raising=False)
+    monkeypatch.delenv("KALSHI_API_KEY_ID_PATH", raising=False)
     monkeypatch.delenv("KALSHI_PRIVATE_KEY_PEM", raising=False)
     monkeypatch.delenv("KALSHI_PRIVATE_KEY_PATH", raising=False)
 

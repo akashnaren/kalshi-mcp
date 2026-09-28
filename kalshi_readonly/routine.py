@@ -19,12 +19,14 @@ Size is quarter Kelly on the recommendation. The order tools enforce the caps:
 - At most $10 of new notional per UTC day.
 
 Install:
-- KALSHI_SAFE_MODE defaults on. After install, set KALSHI_SAFE_MODE=0 and restart the host so this sleeve can trade.
+- The fleet host stays at KALSHI_SAFE_MODE=1. This Finance routine is the only unlock. There is no separate Kalshi role harness.
+- npm run build so dist/index.js is current, then point the host at node dist/index.js. Set KALSHI_SAFE_MODE=0 and restart this host so this sleeve can trade.
+- After restart, tools/list must include fe_routine, place_order, cancel_order, amend_order, and decrease_order. exchange_status is the cheap live check. Not connected means that node process is not running.
 - Every place_order, cancel_order, amend_order, and decrease_order still passes confirm:true.
 
 DAILY:
 1. Call cash_or_positions and list_open_orders.
-2. Call find_best_bets. Pass beliefs only when you can name the evidence. Read edge_net_cents, flb_band, kelly_frac, stake_mode, and suggested_max_dollars_risked.
+2. Call find_best_bets. Pass beliefs only when you can name the evidence. Read edge_net_cents, flb_band, kelly_frac, stake_mode, and suggested_max_dollars_risked. If rate_limited is true, use the partial research_queue and do not scan again immediately.
 3. place_order with confirm:true inside the caps, best score first. Stop when a call returns a cap refusal.
 4. Tell the human what you placed and what you skipped.
 

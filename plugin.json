@@ -1,7 +1,7 @@
 {
   "name": "kalshi-readonly",
   "version": "0.3.0",
-  "description": "Kalshi MCP — public markets, cash, positions, and a read-only bet ranking. Order tools stay unregistered while KALSHI_SAFE_MODE is on (default). No withdraw or deposit.",
+  "description": "Kalshi MCP — markets, cash, positions, and bet ranking. Trade tools are gated behind KALSHI_SAFE_MODE (fleet default on) and stay off tools/list until the Finance Engineer host sets 0. No withdraw or deposit.",
   "skills": "./skills/",
   "mcpServers": "./mcp.json"
 }

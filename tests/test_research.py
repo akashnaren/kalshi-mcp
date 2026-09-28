@@ -2,10 +2,13 @@
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 from kalshi_readonly.recommend import find_best_bets
 from kalshi_readonly.routine import FE_ROUTINE, fe_routine
 from kalshi_readonly.score import edge_net_cents, fee_dome_cents, flb_band
+
+ROOT = Path(__file__).resolve().parents[1]
 
 NOW = datetime(2026, 9, 28, 15, 0, tzinfo=timezone.utc)
 
@@ -149,5 +152,14 @@ def test_routine_names_the_daily_and_eod_hook() -> None:
         "DAILY",
         "EOD",
         "withdraw",
+        "rate_limited",
+        "tools/list",
+        "npm run build",
+        "KALSHI_SAFE_MODE=1",
+        "no separate Kalshi role harness",
     ):
         assert phrase in FE_ROUTINE
+    text = (ROOT / "harness" / "fe-grok-bot-routine.md").read_text(encoding="utf-8")
+    start = text.index("```\n") + len("```\n")
+    end = text.index("\n```", start)
+    assert text[start:end] == FE_ROUTINE
