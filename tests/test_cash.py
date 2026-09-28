@@ -49,6 +49,7 @@ def test_read_tools_stay_registered_when_safe_mode_defaults_on(monkeypatch: pyte
     assert [tool["name"] for tool in registered_tools()] == [
         "exchange_status",
         "list_markets",
+        "find_best_bets",
         "cash_or_positions",
         "list_open_orders",
     ]

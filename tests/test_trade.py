@@ -146,7 +146,7 @@ def test_safe_mode_defaults_on_and_hides_mutations(monkeypatch: pytest.MonkeyPat
     else:
         monkeypatch.setenv("KALSHI_SAFE_MODE", raw)
     names = [tool["name"] for tool in registered_tools()]
-    assert names == ["exchange_status", "list_markets", "cash_or_positions", "list_open_orders"]
+    assert names == ["exchange_status", "list_markets", "find_best_bets", "cash_or_positions", "list_open_orders"]
     assert set(HANDLERS) >= {"place_order", "cancel_order", "amend_order", "decrease_order"}
 
 
