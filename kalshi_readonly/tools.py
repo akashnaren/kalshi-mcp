@@ -12,6 +12,7 @@ from kalshi_readonly.guard import safe_mode_enabled
 from kalshi_readonly.http import auth_get, public_get
 from kalshi_readonly.report import present_balance, present_fills, present_positions
 from kalshi_readonly.stdio import run_server
+from kalshi_readonly.recommend import FIND_BEST_TOOL, find_best_bets
 from kalshi_readonly.trade import (
     MUTATING_HANDLERS,
     MUTATING_TOOLS,
@@ -97,6 +98,7 @@ READ_TOOLS = [
             },
         },
     },
+    FIND_BEST_TOOL,
     {
         "name": "cash_or_positions",
         "description": (
@@ -119,6 +121,7 @@ READ_TOOLS = [
 HANDLERS = {
     "exchange_status": exchange_status,
     "list_markets": list_markets,
+    "find_best_bets": find_best_bets,
     "cash_or_positions": cash_or_positions,
     "list_open_orders": list_open_orders,
     **MUTATING_HANDLERS,

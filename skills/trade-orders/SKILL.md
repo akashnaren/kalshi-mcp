@@ -18,3 +18,5 @@ Akash has explicitly asked for one order action and named the market, side, size
 
 ## Validate
 `side` is `bid` (buy YES) or `ask` (sell YES). `price` is a YES-book dollar string between 0 and 1. `count` is a contract count. Amend `count` means filled plus desired remaining. Decrease takes exactly one of `reduce_by` or `reduce_to`. Cancel should include `market_ticker` from the open order. No withdraw or deposit tool exists.
+
+`find_best_bets` is a read. A row from it is not an order. Do not place that row unless Akash names the trade and confirms.

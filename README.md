@@ -1,8 +1,8 @@
 # kalshi-readonly
 
-Kalshi Trade API v2 MCP over stdio. Read tools cover exchange status, markets, cash, and positions. Trade tools place, cancel, amend, or decrease one order, and list resting orders.
+Kalshi Trade API v2 MCP over stdio. Read tools cover exchange status, markets, cash, positions, and a ranked list of small-stake ideas. Trade tools place, cancel, amend, or decrease one order, and list resting orders.
 
-Mutating trade tools stay off unless safe mode is turned off. There is no deposit tool, no withdraw tool, and no auto-trading tool.
+House default is read-only. Mutating trade tools stay off unless safe mode is turned off. There is no deposit tool, no withdraw tool, and no auto-trading tool. `find_best_bets` never places an order.
 
 ## Run
 
@@ -48,11 +48,48 @@ python3 -c 'import json; from kalshi_readonly.tools import cash_or_positions; pr
 
 ## Install as a Cursor plugin
 
-Cursor hosts read `.cursor-plugin/plugin.json` (`kalshi-readonly`, version `0.2.0`). Root `plugin.json` and `mcp.json` stay in place. Skills are under `skills/`. Stdio launch is root `mcp.json`: command `python3`, args `${PLUGIN_ROOT}/server.py`, env `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH`, `KALSHI_PRIVATE_KEY_PEM`, and `KALSHI_SAFE_MODE` (default on). No secrets are committed.
+Cursor hosts read `.cursor-plugin/plugin.json` (`kalshi-readonly`, version `0.3.0`). Root `plugin.json` and `mcp.json` stay in place. Skills are under `skills/`. The Finance Engineer checklist is `harness/SKILL.md`. Stdio launch for the Cursor plugin is root `mcp.json`: command `python3`, args `${PLUGIN_ROOT}/server.py`, env `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH`, `KALSHI_PRIVATE_KEY_PEM`, and `KALSHI_SAFE_MODE` (default on). No secrets are committed.
 
-This repository is not published to the Cursor Marketplace or cursor.directory. After a publish, install with InstallPlugin. Until then, use the IDE `mcp.json` entry below.
+This repository is not published to the Cursor Marketplace or cursor.directory. Publishing is out of scope. Until then, use the IDE `mcp.json` entry below, or the Grok Bot command in the next section.
 
-Grok Bot custom stdio AddMcpServer has been unreliable for this server. Prefer InstallPlugin after publish, or the IDE `mcp.json` entry. Do not paste the private key into chat. Do not set `confirm` unless Akash has confirmed that order.
+`server.py` puts its own directory on `sys.path` before importing the package, so a host can launch it from another working directory. That includes Python's safe path (`python3 -P`). Do not paste the private key into chat. Do not set `confirm` unless Akash has confirmed that order.
+
+## Grok Bot
+
+Use the Node entry. It speaks MCP stdio with `@modelcontextprotocol/sdk` (the same transport bambu-mcp uses) and keeps one Python worker for the tool calls.
+
+```bash
+npm install
+npm run build
+```
+
+```bash
+node /absolute/path/to/kalshi-mcp/dist/index.js
+```
+
+Set these in the host env, not on the command line:
+
+- `KALSHI_API_KEY_ID`
+- `KALSHI_PRIVATE_KEY_PATH`
+- `KALSHI_SAFE_MODE=1`
+
+`KALSHI_SAFE_MODE=1` is the house default. Order tools stay unregistered. `find_best_bets` only reads. Do not commit the key file.
+
+```json
+{
+  "mcpServers": {
+    "kalshi-readonly": {
+      "command": "node",
+      "args": ["/absolute/path/to/kalshi-mcp/dist/index.js"],
+      "env": {
+        "KALSHI_API_KEY_ID": "your-key-id",
+        "KALSHI_PRIVATE_KEY_PATH": "/absolute/path/to/private.pem",
+        "KALSHI_SAFE_MODE": "1"
+      }
+    }
+  }
+}
+```
 
 ## Cursor
 
@@ -72,7 +109,7 @@ Grok Bot custom stdio AddMcpServer has been unreliable for this server. Prefer I
 }
 ```
 
-`mcp.json` in this repo is the same launch for a plugin host (`${PLUGIN_ROOT}/server.py`).
+`mcp.json` in this repo is the plugin-host launch (`python3` and `${PLUGIN_ROOT}/server.py`). Grok Bot should use the Node command above instead.
 
 ## Tools
 
@@ -80,6 +117,7 @@ Grok Bot custom stdio AddMcpServer has been unreliable for this server. Prefer I
 | --- | --- |
 | `exchange_status` | Public exchange status |
 | `list_markets` | Public markets. Optional `limit` (default 5), `status`, `ticker` |
+| `find_best_bets` | Read-only rank. See Bets. Does not place orders |
 | `cash_or_positions` | Cash and positions. `include`: `balance`, `cash`, `positions`, `both` (default), or `fills`. Optional `limit` (default 50) |
 | `list_open_orders` | Resting orders only (`status=resting`). Optional `ticker`, `limit` (default 100), `cursor`, `subaccount`. Read. No confirm |
 | `place_order` | One order. Hidden until safe mode is off. Requires `confirm: true` |
@@ -88,6 +126,34 @@ Grok Bot custom stdio AddMcpServer has been unreliable for this server. Prefer I
 | `decrease_order` | Reduce resting size. Hidden until safe mode is off. Requires `confirm: true` |
 
 `cash_or_positions` returns `balance_cents`, `balance_dollars`, and `cash` (the same official dollar string). `portfolio_value` is included only when the balance endpoint sends it. `market_positions` and `event_positions` each include `ticker` and `qty` when the API sends a quantity. Market `side` is the official sign of that quantity: positive YES, negative NO. `avg` and `mark` are copied only when the API sends them. `include=fills` reads recent fills (ticker, side, qty, official prices). This server does not compute remaining-to-recover.
+
+## Bets
+
+`find_best_bets` is a read. The dry-run command is `python3 -m kalshi_readonly.recommend --fixture tests/fixtures/recommend_scan.json`. That command uses the file only. It does not call Kalshi and it does not place orders.
+
+The score is `estimated_confidence * payout_ratio / stake_needed`. `stake_needed` is the ask for one contract. `payout_ratio` is the profit per dollar you stake if that side wins. A 15 cent contract with high confidence sorts ahead of an 82 cent contract, because the 82 cent contract ties up more cash for a smaller payout.
+
+Pass `beliefs` when you can name the evidence: `ticker`, `side` (`yes` or `no`), `confidence` (0 to 1), and an optional `evidence` string. At most 20. Those tickers are one `GET /markets?tickers=...` request. The server does not fetch each ticker on its own, and it does not pull an order book per market. Without beliefs, you get a `research_queue` and no recommendations. A queue row is not a bet.
+
+Defaults, all overridable inside a fixed range:
+
+| Knob | Default | Range |
+| --- | --- | --- |
+| `min_confidence` | 0.55 | 0.50 to 0.99 |
+| `min_edge` | 0.08 | 0 to 0.90 |
+| `max_price` | 0.50 | 0.05 to 0.84 |
+| `max_risk_dollars` | 5 | 1 to 25 |
+| `min_volume` | 20 contracts of 24h volume | 0 to 1000000 |
+| `min_ask_size` | 1 | 0 to 100000 |
+| `min_hours_to_expiry` | 2 | 0 to 168 |
+| `max_hours_to_expiry` | 1440 (60 days) | above the minimum, up to 8760 |
+| `max_pages` | 2 | 1 to 4 |
+| `page_size` | 100 | 1 to 200 |
+| `limit` | 5 rows | 1 to 10 |
+
+Prices at or above 0.85 are never recommended. The scan also skips multivariate combos (`mve_filter=exclude`) so a page is not spent on them. A successful list is cached for about 45 seconds in the process. The Node entry keeps that process alive across tool calls.
+
+Every response includes `places_orders: false` and the sentence `do not place until Akash names the trade`. The Finance Engineer routine and a cron prompt you can paste into Grok Bot are in `harness/SKILL.md`.
 
 ## Trade
 

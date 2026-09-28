@@ -1,0 +1,115 @@
+{
+  "now": "2026-09-28T15:00:00Z",
+  "max_price": "0.84",
+  "max_risk_dollars": "5",
+  "beliefs": [
+    {
+      "ticker": "HEAVY-NEAR",
+      "side": "yes",
+      "confidence": 0.93,
+      "evidence": "priced as near certain"
+    },
+    {
+      "ticker": "CHEAP-HIGH",
+      "side": "yes",
+      "confidence": 0.7,
+      "evidence": "three reports agree"
+    },
+    {
+      "ticker": "ILLQ",
+      "side": "yes",
+      "confidence": 0.8,
+      "evidence": "thin book"
+    },
+    {
+      "ticker": "SOON",
+      "side": "yes",
+      "confidence": 0.8,
+      "evidence": "closes in half an hour"
+    },
+    {
+      "ticker": "LOW",
+      "side": "yes",
+      "confidence": 0.4,
+      "evidence": "not enough"
+    },
+    {
+      "ticker": "GONE",
+      "side": "no",
+      "confidence": 0.7,
+      "evidence": "ticker was not in the book"
+    }
+  ],
+  "markets": [
+    {
+      "ticker": "CHEAP-HIGH",
+      "event_ticker": "E-CHEAP-HIGH",
+      "title": "Cheap high payout",
+      "status": "active",
+      "market_type": "binary",
+      "yes_ask_dollars": "0.1500",
+      "no_ask_dollars": "0.8600",
+      "yes_ask_size_fp": "80.00",
+      "no_ask_size_fp": "80.00",
+      "volume_24h_fp": "500.00",
+      "close_time": "2026-10-05T15:00:00Z",
+      "notional_value_dollars": "1.0000"
+    },
+    {
+      "ticker": "HEAVY-NEAR",
+      "event_ticker": "E-HEAVY-NEAR",
+      "title": "Near certain",
+      "status": "active",
+      "market_type": "binary",
+      "yes_ask_dollars": "0.8200",
+      "no_ask_dollars": "0.1900",
+      "yes_ask_size_fp": "80.00",
+      "no_ask_size_fp": "80.00",
+      "volume_24h_fp": "500.00",
+      "close_time": "2026-10-05T15:00:00Z",
+      "notional_value_dollars": "1.0000"
+    },
+    {
+      "ticker": "ILLQ",
+      "event_ticker": "E-ILLQ",
+      "title": "Illiquid",
+      "status": "active",
+      "market_type": "binary",
+      "yes_ask_dollars": "0.1000",
+      "no_ask_dollars": "0.9100",
+      "yes_ask_size_fp": "0.00",
+      "no_ask_size_fp": "0.00",
+      "volume_24h_fp": "1.00",
+      "close_time": "2026-10-05T15:00:00Z",
+      "notional_value_dollars": "1.0000"
+    },
+    {
+      "ticker": "SOON",
+      "event_ticker": "E-SOON",
+      "title": "Closes soon",
+      "status": "active",
+      "market_type": "binary",
+      "yes_ask_dollars": "0.1000",
+      "no_ask_dollars": "0.9100",
+      "yes_ask_size_fp": "40.00",
+      "no_ask_size_fp": "40.00",
+      "volume_24h_fp": "200.00",
+      "close_time": "2026-09-28T15:30:00Z",
+      "notional_value_dollars": "1.0000"
+    },
+    {
+      "ticker": "LOW",
+      "event_ticker": "E-LOW",
+      "title": "Low confidence",
+      "status": "active",
+      "market_type": "binary",
+      "yes_ask_dollars": "0.2000",
+      "no_ask_dollars": "0.8100",
+      "yes_ask_size_fp": "40.00",
+      "no_ask_size_fp": "40.00",
+      "volume_24h_fp": "200.00",
+      "close_time": "2026-10-05T15:00:00Z",
+      "notional_value_dollars": "1.0000"
+    }
+  ]
+}

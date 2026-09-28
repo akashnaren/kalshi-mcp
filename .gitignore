@@ -17,3 +17,5 @@ secrets/
 .secrets/
 
 node_modules/
+dist/
+*.tsbuildinfo

@@ -1,8 +1,8 @@
 {
   "name": "kalshi-readonly",
   "displayName": "Kalshi",
-  "version": "0.2.0",
-  "description": "Kalshi Trade API MCP — markets, cash, and positions. Order tools stay unregistered while KALSHI_SAFE_MODE is on (default) and require confirm=true. No withdraw.",
+  "version": "0.3.0",
+  "description": "Kalshi Trade API MCP — markets, cash, positions, and read-only bet ranking. Order tools stay unregistered while KALSHI_SAFE_MODE is on (default) and require confirm=true. No withdraw.",
   "author": {
     "name": "Akash Premkumar",
     "url": "https://github.com/akashnaren"

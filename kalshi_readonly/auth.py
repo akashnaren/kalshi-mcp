@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -11,7 +12,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 DEFAULT_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
-USER_AGENT = "tinkabot-kalshi-mcp/0.1"
+USER_AGENT = "tinkabot-kalshi-mcp/0.3"
 AUTH_ERROR = "auth required: set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH (or KALSHI_PRIVATE_KEY_PEM)"
 
 
@@ -19,11 +20,30 @@ def api_base() -> str:
     return (os.environ.get("KALSHI_API_BASE") or DEFAULT_API_BASE).strip().rstrip("/")
 
 
+_AUTH: tuple[str, str, str] | None = None
+_KEYS: dict[str, object] = {}
+
+
 def load_auth() -> tuple[str, str]:
+    """Return the key id and PEM. Reuse them until the env or key file changes."""
+    global _AUTH
     key_id = (os.environ.get("KALSHI_API_KEY_ID") or "").strip()
     inline = os.environ.get("KALSHI_PRIVATE_KEY_PEM")
     pem_path = (os.environ.get("KALSHI_PRIVATE_KEY_PATH") or "").strip()
-    pem = inline.strip() if inline and inline.strip() else ""
+    inline_pem = inline.strip() if inline and inline.strip() else ""
+    token = ""
+    if inline_pem:
+        token = "inline:" + hashlib.sha256(inline_pem.encode("utf-8")).hexdigest()
+    elif pem_path:
+        try:
+            stat = Path(pem_path).stat()
+        except OSError:
+            raise RuntimeError("unable to read KALSHI_PRIVATE_KEY_PATH") from None
+        token = f"file:{pem_path}:{stat.st_mtime_ns}:{stat.st_size}"
+    cached = _AUTH
+    if cached is not None and cached[0] == key_id and cached[1] == token and key_id and token:
+        return key_id, cached[2]
+    pem = inline_pem
     if not pem and pem_path:
         try:
             pem = Path(pem_path).read_text(encoding="utf-8")
@@ -31,13 +51,26 @@ def load_auth() -> tuple[str, str]:
             raise RuntimeError("unable to read KALSHI_PRIVATE_KEY_PATH") from None
     if not key_id or "PRIVATE KEY" not in pem:
         raise RuntimeError(AUTH_ERROR)
+    _AUTH = (key_id, token, pem)
     return key_id, pem
+
+
+def _private_key(pem: str):
+    digest = hashlib.sha256(pem.encode("utf-8")).hexdigest()
+    found = _KEYS.get(digest)
+    if found is not None:
+        return found
+    key = serialization.load_pem_private_key(pem.encode("utf-8"), password=None)
+    if len(_KEYS) >= 4:
+        _KEYS.clear()
+    _KEYS[digest] = key
+    return key
 
 
 def sign_request(pem: str, timestamp_ms: str, method: str, path: str) -> str:
     """RSA-PSS SHA-256 over `timestamp + METHOD + path`. Query strings are not signed."""
     message = f"{timestamp_ms}{method.upper()}{path.split('?', 1)[0]}".encode("utf-8")
-    private_key = serialization.load_pem_private_key(pem.encode("utf-8"), password=None)
+    private_key = _private_key(pem)
     signature = private_key.sign(
         message,
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
