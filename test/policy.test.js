@@ -30,10 +30,10 @@ test("mutations need safe mode off and confirm true", () => {
   assert.doesNotThrow(() => assertCanMutate(true, { KALSHI_SAFE_MODE: "0" }));
 });
 
-test("confidence floor cannot be lowered", () => {
+test("the edge gate replaces a confidence floor", () => {
   assert.equal(HIGH_CONFIDENCE, 0.65);
-  assert.throws(() => resolveFilters({ min_confidence: 0.4 }), /0\.65/);
-  assert.equal(resolveFilters({ min_confidence: 0.8 }).min_confidence, 0.8);
+  assert.equal(resolveFilters({}).min_confidence, 0);
+  assert.equal(resolveFilters({ min_confidence: 0.4 }).min_confidence, 0.4);
 });
 
 test("signals require a concrete named key, detail, and scope", () => {
@@ -42,12 +42,14 @@ test("signals require a concrete named key, detail, and scope", () => {
   assert.throws(() => validateSignals([signal({ key: "Feeling" })]), /snake_case/);
   assert.throws(() => validateSignals([signal({ detail: "looks good" })]), /concrete detail/);
   assert.throws(() => validateSignals([signal({ market_ticker: "", event_ticker: "", series_ticker: "" })]), /market_ticker/);
+  assert.throws(() => validateSignals([signal({ category_tag: "Vibes" })]), /category_tag/);
+  assert.throws(() => validateSignals([signal({ settlement_match_score: 2 })]), /settlement_match_score/);
   const [parsed] = validateSignals([signal()]);
   assert.equal(parsed.key, "nhc_cone_includes_city");
   assert.deepEqual(parsed.keys ?? undefined, undefined);
 });
 
-test("low stake and high payout outrank a pricey contract when confidence is high", () => {
+test("higher edge_net outranks a larger payoff", () => {
   const cheap = market({
     ticker: "CHEAP-1",
     yes_bid_dollars: "0.1400",
@@ -76,13 +78,17 @@ test("low stake and high payout outrank a pricey contract when confidence is hig
   );
   assert.deepEqual(ranked.recommendations.map((row) => row.ticker), ["CHEAP-1", "PRICEY-1"]);
   const [best, second] = ranked.recommendations;
-  assert.ok(best.stake < second.stake);
-  assert.ok(best.payout > second.payout);
-  assert.ok(best.score > second.score);
-  assert.equal(best.score, Math.round((best.confidence * best.payout * 10000) / best.stake) / 10000);
+  assert.ok(best.edge_net_cents > second.edge_net_cents);
+  assert.equal(best.score, best.edge_net_cents);
   assert.equal(best.confidence, 0.8);
   assert.equal(best.stake, 0.15);
-  assert.equal(best.payout, 0.85);
+  assert.equal(best.flb_band, "10–25¢");
+  assert.equal(best.category_tag, "Weather");
+  assert.equal(best.corr_group, "city_weather_week");
+  assert.equal(best.settlement_match_score, 1);
+  assert.equal(typeof best.maker_flag, "boolean");
+  assert.ok(best.depth_at_limit >= 10);
+  assert.equal(best.fee_entry_cents >= 1, true);
   assert.deepEqual(best.keys, ["nhc_cone_includes_city"]);
   assert.equal(ranked.skipped.low_confidence, 1);
 });
@@ -120,18 +126,40 @@ test("disagreement and thin books are not recommendations", () => {
   assert.equal(ranked.skipped.illiquid, 1);
 });
 
-test("a medium favorite without high confidence is not a lane", () => {
+test("a favorite bought for win rate and a cheap take are skipped", () => {
   const ranked = rankMarkets(
-    [market({
-      ticker: "MID-1",
-      yes_bid_dollars: "0.6800",
-      yes_ask_dollars: "0.7000",
-    })],
-    [signal({ market_ticker: "MID-1", confidence: 0.7, key: "rcp_polling_average", detail: "RCP average is 62 percent" })],
-    filters(),
+    [
+      market({ ticker: "MID-1", yes_bid_dollars: "0.6800", yes_ask_dollars: "0.7000" }),
+      market({ ticker: "SURE-1", yes_bid_dollars: "0.9600", yes_ask_dollars: "0.9800" }),
+      market({ ticker: "LOTTO-1", yes_bid_dollars: "0.0400", yes_ask_dollars: "0.0800" }),
+      market({ ticker: "BLIND-1", yes_bid_dollars: "0.4000", yes_ask_dollars: "0.4200" }),
+    ],
+    [
+      signal({ market_ticker: "MID-1", confidence: 0.7, key: "rcp_polling_average", detail: "RCP average is 62 percent" }),
+      signal({ market_ticker: "SURE-1", confidence: 0.99, key: "win_rate_favorite", detail: "This side wins almost every time at 98 cents" }),
+      signal({
+        market_ticker: "LOTTO-1",
+        confidence: 0.12,
+        category_tag: "Politics",
+        corr_group: "us_election_2026",
+        key: "cheap_contract_bias",
+        detail: "Price is 8 cents so the payoff looks large",
+      }),
+      signal({
+        market_ticker: "BLIND-1",
+        confidence: 0.7,
+        model_sources: "fee-blind backtest of mid prices",
+        key: "mid_price_backtest",
+        detail: "Backtest ignored fees and still looked profitable",
+      }),
+    ],
+    filters({ min_confidence: 0 }),
   );
   assert.equal(ranked.recommendations.length, 0);
-  assert.equal(ranked.skipped.not_in_lane, 1);
+  assert.equal(ranked.skipped.thin_edge, 1);
+  assert.equal(ranked.skipped.favorite_wr, 1);
+  assert.equal(ranked.skipped.longshot_take, 1);
+  assert.equal(ranked.skipped.fee_blind, 1);
 });
 
 test("legacy cent quotes still produce a stake and a payout", () => {

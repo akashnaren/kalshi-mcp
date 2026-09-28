@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Kalshi MCP for Grok Bot. Recommends low-stake, high-payout contracts only when named signals say confidence is high. Safe mode on by default.",
+  "description": "Kalshi MCP for the Finance Engineer sleeve. Gates on edge_net after the fee dome. Safe mode on by default.",
   "bin": {
     "kalshi-mcp": "./src/index.js"
   },

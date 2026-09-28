@@ -11,16 +11,26 @@ test("harness skill and routine carry the policy", () => {
   const routineFile = fs.readFileSync(new URL("../harness/fe-grok-bot-routine.md", import.meta.url), "utf8");
   const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
   for (const text of [skill, routineFile, readme, FE_ROUTINE]) {
-    assert.match(text, /0\.65/);
-    assert.match(text, /confidence \* payout \/ stake/);
+    assert.match(text, /edge_net/);
+    assert.match(text, /fee_dome/);
+    assert.match(text, /flb_band/);
+    assert.match(text, /horizon_days/);
+    assert.match(text, /category_tag/);
+    assert.match(text, /corr_group/);
+    assert.match(text, /model_sources/);
+    assert.match(text, /settlement_match_score/);
+    assert.match(text, /maker/);
+    assert.match(text, /Kelly/);
+    assert.match(text, /Polymarket is not Kalshi/);
     assert.match(text, /KALSHI_SAFE_MODE/);
     assert.match(text, /confirm:true/);
     assert.match(text, /find_best_bets/);
-    assert.match(text, /\$1 default/);
+    assert.match(text, /\$2/);
     assert.match(text, /\$15/);
     assert.match(text, /profitable/);
     assert.match(text, /15%/);
     assert.match(text, /\$10/);
+    assert.match(text, /hold to settlement/);
     assert.match(text, /DAILY/);
     assert.match(text, /EOD/);
   }

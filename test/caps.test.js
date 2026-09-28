@@ -10,7 +10,6 @@ import {
   openingNotional,
   reviewPositions,
   sizeIdeas,
-  situationFactor,
   summarizeBook,
 } from "../src/caps.js";
 
@@ -22,7 +21,9 @@ test("defaults match the starter sleeve and the ceiling cannot be raised", () =>
   assert.equal(loaded.default_dollars_per_trade, CAP_DEFAULTS.default_dollars_per_trade);
   assert.equal(loaded.max_dollars_per_trade, HARD_TRADE_CEILING);
   assert.equal(loaded.max_sleeve_fraction, 0.15);
+  assert.equal(loaded.max_group_fraction, 0.2);
   assert.equal(loaded.max_daily_notional, 10);
+  assert.equal(loadCaps({ KALSHI_MAX_GROUP_FRACTION: "0.5" }).max_group_fraction, 0.2);
   assert.equal(loadCaps({ KALSHI_MAX_DOLLARS_PER_TRADE: "100" }).max_dollars_per_trade, 15);
   assert.equal(loadCaps({ KALSHI_MAX_DOLLARS_PER_TRADE: "nope" }).max_dollars_per_trade, 15);
   assert.equal(loadCaps({ KALSHI_MAX_DOLLARS_PER_TRADE: "8" }).max_dollars_per_trade, 8);
@@ -35,9 +36,9 @@ test("defaults match the starter sleeve and the ceiling cannot be raised", () =>
 test("caps block a raise without a winning history, a hard max, a concentrated market, a full day, and an all-in", () => {
   const base = caps();
   const won = { allows_scale: true };
-  assert.equal(checkBuyCaps({ notional: 1, marketExposure: 0, dailyNotional: 0, caps: base }).ok, true);
+  assert.equal(checkBuyCaps({ notional: 2, marketExposure: 0, dailyNotional: 0, caps: base }).ok, true);
   assert.match(
-    checkBuyCaps({ notional: 1.01, marketExposure: 0, dailyNotional: 0, caps: base }).reasons.join(" "),
+    checkBuyCaps({ notional: 2.01, marketExposure: 0, dailyNotional: 0, caps: base }).reasons.join(" "),
     /profitable/,
   );
   assert.match(checkBuyCaps({ notional: 1, marketExposure: 10, dailyNotional: 0, caps: base }).reasons.join(" "), /15%/);
@@ -67,65 +68,54 @@ test("caps block a raise without a winning history, a hard max, a concentrated m
 
 const strongIdea = {
   ticker: "STRONG",
-  lane: "asymmetric",
   stake: 0.25,
   confidence: 1,
-  keys: ["rcp_polling_average", "nhc_cone_includes_city", "fedwatch_cut_prob"],
-  payout_to_stake: 6,
-  liquidity: { spread: 0, top_size: 200 },
-  score: 9,
+  corr_group: "city_weather_week",
+  depth_at_limit: 200,
 };
 
-const floorIdea = {
-  ticker: "FLOOR",
-  lane: "asymmetric",
-  stake: 0.4,
-  confidence: 0.65,
-  keys: ["only_one_key"],
-  payout_to_stake: 1,
-  liquidity: { spread: 0.08, top_size: 10 },
-  score: 1,
-};
-
-const modestIdea = {
-  ticker: "MODEST",
-  lane: "likely",
-  stake: 0.5,
-  confidence: 0.85,
-  keys: ["only_one_key"],
-  liquidity: { spread: 0.08, top_size: 10 },
-  score: 0.85,
-};
-
-test("sizing stays at the small default until history is profitable, then follows the situation", () => {
-  assert.equal(situationFactor(strongIdea), 1);
-  assert.equal(situationFactor(floorIdea), 0);
-  assert.equal(situationFactor(modestIdea), 0.2);
-
+test("quarter Kelly stays near $2 until history is profitable, then half Kelly can reach $15", () => {
   const ideas = [];
-  for (let i = 0; i < 11; i += 1) {
-    ideas.push({ ticker: `M${i}`, lane: "asymmetric", stake: 0.5, score: 11 - i });
+  for (let i = 0; i < 6; i += 1) {
+    ideas.push({ ticker: `M${i}`, stake: 0.5, confidence: 0.8, corr_group: `driver_${i}`, depth_at_limit: 100 });
   }
   const sized = sizeIdeas(ideas, { caps: caps(), marketExposure: {}, dailyNotional: 0 });
   const dollars = sized.recommendations.map((row) => row.suggested_dollars);
-  assert.deepEqual(dollars, [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
-  assert.equal(sized.unsized.some((row) => row.ticker === "M10" && row.blocked_by === "daily_cap"), true);
+  assert.deepEqual(dollars, [2, 2, 2, 2, 2]);
+  assert.equal(sized.unsized.some((row) => row.ticker === "M5" && row.blocked_by === "daily_cap"), true);
 
   const wide = loadCaps({ KALSHI_SLEEVE_DOLLARS: "200", KALSHI_MAX_DAILY_NOTIONAL: "20" });
-  const won = { allows_scale: true };
   const cold = sizeIdeas([strongIdea], { caps: wide, history: { allows_scale: false } });
-  assert.equal(cold.recommendations[0].suggested_dollars, 1);
-  const hot = sizeIdeas([strongIdea, modestIdea, floorIdea], { caps: wide, history: won });
+  assert.equal(cold.recommendations[0].suggested_dollars, 2);
+  const hot = sizeIdeas([strongIdea], { caps: wide, history: { allows_scale: true } });
   assert.equal(hot.recommendations[0].suggested_dollars, 15);
-  assert.equal(hot.recommendations[1].suggested_dollars, 3.8);
-  assert.equal(hot.recommendations[2].suggested_dollars, 1);
+
+  const thin = sizeIdeas(
+    [{ ticker: "THIN", stake: 0.4, confidence: 0.42, corr_group: "fed_path", depth_at_limit: 50 }],
+    { caps: caps(), dailyNotional: 0 },
+  );
+  assert.ok(thin.recommendations[0].suggested_dollars < 2);
+  assert.ok(thin.recommendations[0].suggested_dollars > 0);
 
   const crowded = sizeIdeas(
-    [{ ticker: "HELD", lane: "asymmetric", stake: 0.25, score: 3 }],
+    [{ ticker: "HELD", stake: 0.25, confidence: 0.8, corr_group: "fed_path", depth_at_limit: 40 }],
     { caps: caps(), marketExposure: { HELD: 10.65 }, dailyNotional: 0 },
   );
   assert.equal(crowded.recommendations.length, 0);
   assert.equal(crowded.unsized[0].blocked_by, "market_cap");
+});
+
+test("one corr_group shares a cap even when the tickers differ", () => {
+  const wideDay = loadCaps({ KALSHI_MAX_DAILY_NOTIONAL: "40" });
+  const ideas = [];
+  for (let i = 0; i < 8; i += 1) {
+    ideas.push({ ticker: `G${i}`, stake: 0.5, confidence: 0.9, corr_group: "us_election_2026", depth_at_limit: 80 });
+  }
+  const sized = sizeIdeas(ideas, { caps: wideDay, dailyNotional: 0 });
+  const spent = sized.recommendations.reduce((sum, row) => sum + row.suggested_dollars, 0);
+  assert.ok(spent <= 14.2);
+  assert.equal(sized.recommendations[7].suggested_dollars <= 0.2, true);
+  assert.equal(sized.unsized.length, 0);
 });
 
 test("win history scales only after three closes and a positive net", () => {
@@ -179,7 +169,12 @@ test("review marks take profit, cut, and hold", () => {
     { ticker: "LOSE", cost: 1, mark: 0.5 },
     { ticker: "FLAT", cost: 1, mark: 1.1 },
   ], rules);
-  assert.deepEqual(reviews.map((row) => row.action), ["take_profit", "cut", "hold"]);
+  assert.deepEqual(reviews.map((row) => row.action), ["hold", "cut", "hold"]);
+  const falsified = reviewPositions([
+    { ticker: "NEWS", cost: 1, mark: 1.2, falsifier_hit: true },
+    { ticker: "FLIP", cost: 1, mark: 1.1, edge_net_cents: -4, fee_exit_cents: 2 },
+  ], rules);
+  assert.deepEqual(falsified.map((row) => row.action), ["cut", "cut"]);
 });
 
 test("the ledger does not double count an order the book already has", () => {

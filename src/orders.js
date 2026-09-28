@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { checkBuyCaps, loadCaps, loadRiskBook, openingNotional, orderNotional, signedContracts, tradeSizeReasons } from "./caps.js";
+import { assertEarlyExit, evaluateEntry, fractionalKellyDollars, isFeeBlind } from "./edge.js";
 import { assertCanMutate, PolicyError, round4 } from "./policy.js";
 
 const ORDER_ID_RE = /^[A-Za-z0-9-]{8,80}$/;
@@ -40,7 +41,7 @@ async function bookOrRefuse(client, ledger) {
   }
 }
 
-function enforceCaps({ notional, ticker, book, caps, history, checkSize = true }) {
+function enforceCaps({ notional, ticker, book, caps, history, checkSize = true, kellyDollars, corrGroup, groupExposure = 0 }) {
   const verdict = checkBuyCaps({
     notional,
     marketExposure: book.byTicker[ticker] || 0,
@@ -48,11 +49,50 @@ function enforceCaps({ notional, ticker, book, caps, history, checkSize = true }
     caps,
     history: history ?? book.history,
     checkSize,
+    kellyDollars,
+    corrGroup,
+    groupExposure,
   });
   if (!verdict.ok) {
     throw new PolicyError("CAP", verdict.reasons.join("; "));
   }
   return verdict;
+}
+
+function entryPrice(side, price) {
+  return side === "ask" ? round4(1 - Number(price)) : Number(price);
+}
+
+function assertOpeningEdge({ side, price, research, timeInForce }) {
+  const complete = research && research.p_model != null && research.category_tag && research.corr_group
+    && research.model_sources && research.settlement_match_score != null;
+  if (!complete) {
+    throw new PolicyError(
+      "BAD_EDGE",
+      "Opening risk needs p_model, category_tag, corr_group, model_sources, settlement_match_score, and horizon_days.",
+    );
+  }
+  if (isFeeBlind(`${research.model_sources || ""} ${research.detail || ""}`)) {
+    throw new PolicyError("BAD_EDGE", "Fee-blind backtests are not a reason to trade.");
+  }
+  const decision = evaluateEntry({
+    pModel: research.p_model,
+    ask: entryPrice(side, price),
+    bid: research.bid,
+    category: research.category_tag,
+    horizonDays: research.horizon_days ?? 0,
+    holdToSettle: research.hold_to_settle !== false,
+    depth: research.depth_at_limit ?? 0,
+    settlementMatch: Number(research.settlement_match_score),
+  });
+  if (!decision.ok) {
+    throw new PolicyError("BAD_EDGE", `Refusing open: ${decision.reason}. Gate is edge_net after fee_dome, spread, and depth.`);
+  }
+  const tif = timeInForce || "good_till_canceled";
+  if (decision.maker_flag && (tif === "immediate_or_cancel" || tif === "fill_or_kill")) {
+    throw new PolicyError("BAD_EDGE", "prefer maker when edge is small; rest a good_till_canceled limit");
+  }
+  return decision;
 }
 
 export async function placeOrder({
@@ -66,6 +106,7 @@ export async function placeOrder({
   count,
   price,
   timeInForce,
+  research,
 }) {
   assertCanMutate(confirm, env);
   const run = async () => {
@@ -77,8 +118,35 @@ export async function placeOrder({
       price,
       positionContracts: book.contractsByTicker[ticker] || 0,
     });
+    let decision = null;
+    let kellyDollars;
+    if (notional > 0) {
+      decision = assertOpeningEdge({ side, price, research, timeInForce });
+      const groupName = research.corr_group;
+      const groupExposure = book.byGroup?.[groupName] || 0;
+      kellyDollars = fractionalKellyDollars({
+        p: research.p_model,
+        price: entryPrice(side, price),
+        bankroll: caps.sleeve_dollars,
+        history: book.history,
+        groupAlreadyOpen: groupExposure > 0,
+        drawdown: Number(research.drawdown_from_peak) || 0,
+      });
+      if (drawdownBlocks(research)) {
+        throw new PolicyError("CAP", "drawdown from peak is at least 40 percent; new risk is halted");
+      }
+    }
     const verdict = notional > 0
-      ? enforceCaps({ notional, ticker, book, caps, history: book.history })
+      ? enforceCaps({
+        notional,
+        ticker,
+        book,
+        caps,
+        history: book.history,
+        kellyDollars,
+        corrGroup: research?.corr_group,
+        groupExposure: book.byGroup?.[research?.corr_group] || 0,
+      })
       : { ok: true, notional: 0 };
     const body = buildCreateOrderBody({
       ticker,
@@ -88,7 +156,12 @@ export async function placeOrder({
       timeInForce: timeInForce || "good_till_canceled",
     });
     if (notional > 0 && ledger) {
-      ledger.record({ ticker, notional, client_order_id: body.client_order_id });
+      ledger.record({
+        ticker,
+        notional,
+        client_order_id: body.client_order_id,
+        corr_group: research?.corr_group,
+      });
     }
     try {
       const order = await client.createOrder(body);
@@ -98,7 +171,9 @@ export async function placeOrder({
         caps: verdict,
         request: body,
         order,
-        note: "Sent because KALSHI_SAFE_MODE was off, confirm was true, and the caps allowed it.",
+        edge_net_cents: decision?.edge_net_cents ?? null,
+        maker_flag: decision?.maker_flag ?? false,
+        note: "Sent because KALSHI_SAFE_MODE was off, confirm was true, edge_net cleared the fee dome, and the caps allowed it.",
       };
     } catch (err) {
       if (notional > 0 && ledger) ledger.release(body.client_order_id, notional);
@@ -108,8 +183,14 @@ export async function placeOrder({
   return lock ? lock(run) : run();
 }
 
-export async function exitPosition({ client, env, confirm, ticker, count, price }) {
+function drawdownBlocks(research) {
+  return Number(research?.drawdown_from_peak) >= 0.4;
+}
+
+export async function exitPosition({ client, env, confirm, ticker, count, price, falsifierHit, edgeNetCents }) {
   assertCanMutate(confirm, env);
+  const gate = assertEarlyExit({ falsifierHit, edgeNetCents, exitPrice: price });
+  if (!gate.ok) throw new PolicyError("HOLD", gate.reason);
   const payload = await client.getPositions({ ticker });
   const row = rowsOf(payload, "market_positions", "positions").find((item) => item.ticker === ticker);
   const pos = signedContracts(row);

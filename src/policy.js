@@ -1,10 +1,16 @@
 /**
  * Akash Finance Engineer policy.
- * Trade a small sleeve. Prefer a small stake and a high payout when named
- * indicators are strong. Otherwise a modest size on a highly likely side.
- * Score for the cheap lane is confidence * payout / stake.
+ * Gate on edge_net after the Kalshi fee dome, spread, and depth.
+ * Win rate and payoff size are not reasons to trade.
  * Caps and confirm:true are enforced on every order. No withdraw, no deposit.
  */
+
+import {
+  CATEGORIES,
+  evaluateEntry,
+  horizonFromClose,
+  isFeeBlind,
+} from "./edge.js";
 
 export const HIGH_CONFIDENCE = 0.65;
 export const ASYMMETRIC_MAX_STAKE = 0.4;
@@ -169,6 +175,33 @@ function validateSignal(signal, index) {
       `Signal "${key}" needs a market_ticker, event_ticker, or series_ticker so the scan stays narrow.`,
     );
   }
+  const category_tag = String(signal.category_tag ?? "").trim();
+  if (!CATEGORIES.includes(category_tag)) {
+    throw new PolicyError(
+      "BAD_KEY",
+      `Signal "${key}" category_tag must be one of ${CATEGORIES.join(", ")}.`,
+    );
+  }
+  const corr_group = String(signal.corr_group ?? "").trim();
+  if (!KEY_RE.test(corr_group)) {
+    throw new PolicyError("BAD_KEY", `Signal "${key}" corr_group must be a snake_case risk driver.`);
+  }
+  const model_sources = String(signal.model_sources ?? "").trim();
+  if (model_sources.length < 8 || model_sources.length > 200) {
+    throw new PolicyError("BAD_KEY", `Signal "${key}" model_sources must name the model, 8 to 200 characters.`);
+  }
+  const settlement_match_score = Number(signal.settlement_match_score);
+  if (!Number.isFinite(settlement_match_score) || settlement_match_score < 0 || settlement_match_score > 1) {
+    throw new PolicyError("BAD_KEY", `Signal "${key}" settlement_match_score must be from 0 to 1.`);
+  }
+  let horizon_days = null;
+  if (signal.horizon_days != null && signal.horizon_days !== "") {
+    horizon_days = Number(signal.horizon_days);
+    if (!Number.isFinite(horizon_days) || horizon_days < 0 || horizon_days > 3650) {
+      throw new PolicyError("BAD_KEY", `Signal "${key}" horizon_days must be a non-negative number of days.`);
+    }
+  }
+  const falsifier = signal.falsifier == null ? "" : String(signal.falsifier).trim();
   return {
     key,
     confidence: round4(confidence),
@@ -177,6 +210,12 @@ function validateSignal(signal, index) {
     market_ticker,
     event_ticker,
     series_ticker,
+    category_tag,
+    corr_group,
+    model_sources,
+    settlement_match_score: round4(settlement_match_score),
+    horizon_days,
+    falsifier,
   };
 }
 
@@ -191,14 +230,8 @@ function cleanTicker(value, key, field) {
 
 export function resolveFilters(options = {}) {
   const requested = options.min_confidence;
-  if (requested != null && Number(requested) < HIGH_CONFIDENCE) {
-    throw new PolicyError(
-      "CONFIDENCE_FLOOR",
-      `min_confidence cannot be below ${HIGH_CONFIDENCE}. High confidence is required before a side is recommended.`,
-    );
-  }
   return {
-    min_confidence: requested == null ? DEFAULTS.min_confidence : Number(requested),
+    min_confidence: requested == null ? 0 : bounded(requested, 0, 0, 1, "min_confidence"),
     min_volume_24h: nonNegative(options.min_volume_24h, DEFAULTS.min_volume_24h, "min_volume_24h"),
     min_open_interest: nonNegative(options.min_open_interest, DEFAULTS.min_open_interest, "min_open_interest"),
     max_spread: bounded(options.max_spread, DEFAULTS.max_spread, 0, 1, "max_spread"),
@@ -269,6 +302,12 @@ export function rankMarkets(markets, signals, filters) {
     wide_spread: 0,
     thin_book: 0,
     not_in_lane: 0,
+    longshot_take: 0,
+    favorite_wr: 0,
+    thin_edge: 0,
+    ambiguous_settlement: 0,
+    fee_blind: 0,
+    research_conflict: 0,
   };
   const examples = [];
   const note = (ticker, reason) => {
@@ -311,6 +350,11 @@ export function rankMarkets(markets, signals, filters) {
       note(ticker, "low_confidence");
       continue;
     }
+    const research = mergeResearch(group);
+    if (research.conflict) {
+      note(ticker, "research_conflict");
+      continue;
+    }
 
     const quote = quoteForSide(market, side);
     if (quote.ask == null || !(quote.ask > 0) || !(quote.ask < quote.notional)) {
@@ -339,21 +383,32 @@ export function rankMarkets(markets, signals, filters) {
 
     const stake = quote.ask;
     const payout = round4(quote.notional - stake);
-    const lane = classifyLane({ confidence, stake, minConfidence: filters.min_confidence });
-    if (!lane) {
-      note(ticker, "not_in_lane");
+    if (isFeeBlind(`${research.model_sources} ${group.map((signal) => signal.detail).join(" ")}`)) {
+      note(ticker, "fee_blind");
       continue;
     }
-    const score = lane === "asymmetric"
-      ? round4((confidence * payout) / stake)
-      : confidence;
+    const horizonDays = research.horizon_days ?? horizonFromClose(market.close_time) ?? 30;
+    const decision = evaluateEntry({
+      pModel: confidence,
+      ask: stake,
+      bid: quote.bid,
+      category: research.category_tag,
+      horizonDays,
+      holdToSettle: true,
+      depth: quote.topSize,
+      settlementMatch: research.settlement_match_score,
+    });
+    if (!decision.ok) {
+      note(ticker, decision.reason);
+      continue;
+    }
     const keys = [...new Set(group.map((signal) => signal.key))].sort();
     recommendations.push({
       ticker,
       event_ticker: market.event_ticker ?? "",
       label: (side === "yes" ? market.yes_sub_title : market.no_sub_title) || market.title || ticker,
       side,
-      lane,
+      lane: decision.maker_flag ? "maker" : "taker",
       confidence,
       keys,
       indicators: group.map((signal) => ({
@@ -364,7 +419,22 @@ export function rankMarkets(markets, signals, filters) {
       stake,
       payout,
       payout_to_stake: round4(payout / stake),
-      score,
+      score: decision.edge_net_cents,
+      edge_net_cents: decision.edge_net_cents,
+      fee_entry_cents: decision.fee_entry_cents,
+      fee_exit_cents: decision.fee_exit_cents,
+      fee_dome: decision.fee_dome,
+      flb_band: decision.flb_band,
+      spread_rel: decision.spread_rel,
+      depth_at_limit: decision.depth_at_limit,
+      maker_flag: decision.maker_flag,
+      hold_to_settle: true,
+      horizon_days: horizonDays,
+      category_tag: research.category_tag,
+      corr_group: research.corr_group,
+      model_sources: research.model_sources,
+      settlement_match_score: research.settlement_match_score,
+      falsifier: research.falsifier,
       close_time: market.close_time ?? null,
       liquidity: {
         volume_24h: volume,
@@ -376,10 +446,7 @@ export function rankMarkets(markets, signals, filters) {
   }
 
   recommendations.sort((a, b) => {
-    const laneDelta = laneRank(a.lane) - laneRank(b.lane);
-    if (laneDelta !== 0) return laneDelta;
-    if (b.score !== a.score) return b.score - a.score;
-    if (b.payout_to_stake !== a.payout_to_stake) return b.payout_to_stake - a.payout_to_stake;
+    if (b.edge_net_cents !== a.edge_net_cents) return b.edge_net_cents - a.edge_net_cents;
     if (a.stake !== b.stake) return a.stake - b.stake;
     return a.ticker < b.ticker ? -1 : a.ticker > b.ticker ? 1 : 0;
   });
@@ -415,6 +482,22 @@ export function signalMatches(signal, market) {
   return eventTicker === series || eventTicker.startsWith(`${series}-`) || ticker.startsWith(`${series}-`);
 }
 
+function mergeResearch(group) {
+  const categories = new Set(group.map((signal) => signal.category_tag));
+  const groups = new Set(group.map((signal) => signal.corr_group));
+  if (categories.size > 1 || groups.size > 1) return { conflict: true };
+  const horizons = group.map((signal) => signal.horizon_days).filter((value) => value != null);
+  return {
+    conflict: false,
+    category_tag: [...categories][0],
+    corr_group: [...groups][0],
+    model_sources: [...new Set(group.map((signal) => signal.model_sources))].join("; "),
+    settlement_match_score: Math.min(...group.map((signal) => signal.settlement_match_score)),
+    horizon_days: horizons.length ? Math.max(...horizons) : null,
+    falsifier: group.map((signal) => signal.falsifier).filter(Boolean).join("; "),
+  };
+}
+
 export function classifyLane({ confidence, stake, minConfidence = HIGH_CONFIDENCE }) {
   if (confidence >= minConfidence && stake <= ASYMMETRIC_MAX_STAKE) return "asymmetric";
   if (confidence >= LIKELY_CONFIDENCE) return "likely";
@@ -428,16 +511,24 @@ function laneRank(lane) {
 export function policySummary(filters) {
   return {
     name: "akash_finance_engineer",
-    prefer: "small stake and high payout when named indicators are strong; modest size on a highly likely side",
-    score: "confidence * payout / stake",
-    likely_score: "confidence",
+    prefer: "edge_net after fee dome, spread, and depth; maker when that edge is small; hold to settlement",
+    score: "edge_net_cents",
+    fee_dome: "ceil_cent(0.07 * contracts * price * (1 - price))",
+    size: "quarter Kelly until sleeve fills are profitable, then half Kelly, inside the caps",
     payout: "profit if that side wins (notional minus the ask)",
     stake: "ask paid to enter, in dollars",
-    high_confidence_min: HIGH_CONFIDENCE,
-    asymmetric_max_stake: ASYMMETRIC_MAX_STAKE,
-    likely_confidence_min: LIKELY_CONFIDENCE,
     confidence_min_applied: filters.min_confidence,
     requires_named_indicator_keys: true,
+    named_indicators: [
+      "edge_net",
+      "flb_band",
+      "horizon_days",
+      "category_tag",
+      "corr_group",
+      "model_sources",
+      "settlement_match_score",
+    ],
+    polymarket_is_not_kalshi: true,
     auto_trade: true,
     scan_places_orders: false,
     mode: "trade_within_caps",

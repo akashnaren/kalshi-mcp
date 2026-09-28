@@ -19,6 +19,8 @@ export async function findBestBets({ client, signals, options = {}, caps, ledger
     marketExposure: book.marketExposure,
     dailyNotional: book.dailyNotional,
     history: book.history,
+    groupExposure: book.groupExposure,
+    drawdown: Number(options.drawdown_from_peak) || 0,
   });
   return {
     policy: policySummary(filters),
@@ -28,9 +30,18 @@ export async function findBestBets({ client, signals, options = {}, caps, ledger
       max_dollars_per_trade: activeCaps.max_dollars_per_trade,
       max_sleeve_fraction: activeCaps.max_sleeve_fraction,
       max_daily_notional: activeCaps.max_daily_notional,
+      max_group_fraction: activeCaps.max_group_fraction,
       market_cap: marketCapDollars(activeCaps),
     },
     win_history: book.history,
+    calibration: {
+      source: "kalshi_fills",
+      polymarket_is_not_kalshi: true,
+      reestimate_on_own_fills: true,
+      closed_trades: book.history?.closed_trades ?? 0,
+      net_realized: book.history?.net_realized ?? 0,
+      allows_scale: book.history?.allows_scale === true,
+    },
     filters: {
       min_confidence: filters.min_confidence,
       min_volume_24h: filters.min_volume_24h,
@@ -57,6 +68,7 @@ async function suggestionBook(client, ledger, options, now) {
       marketExposure: options.market_exposure ?? {},
       dailyNotional: Number(options.daily_notional) || 0,
       history: closedHistory(),
+      groupExposure: options.group_exposure ?? {},
       book_error: null,
     };
   }
@@ -66,6 +78,7 @@ async function suggestionBook(client, ledger, options, now) {
       marketExposure: book.byTicker,
       dailyNotional: book.daily,
       history: book.history,
+      groupExposure: book.byGroup ?? {},
       book_error: null,
     };
   } catch (err) {
@@ -73,6 +86,7 @@ async function suggestionBook(client, ledger, options, now) {
       marketExposure: options.market_exposure ?? {},
       dailyNotional: Number(options.daily_notional) || 0,
       history: closedHistory(),
+      groupExposure: options.group_exposure ?? {},
       book_error: err.message,
     };
   }

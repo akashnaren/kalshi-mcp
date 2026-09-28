@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createLedger, createLock } from "../src/caps.js";
+import { research } from "./helpers.js";
 import { amendOrder, buildCreateOrderBody, cancelOrder, decreaseOrder, exitPosition, placeOrder } from "../src/orders.js";
 
 test("order body is a V2 limit with a panic cancel", () => {
@@ -46,7 +47,7 @@ test("place and cancel do not touch the client until both gates pass", async () 
   assert.equal(calls.length, 0);
 
   const placed = await placeOrder({
-    client, env: open, confirm: true, ticker: "KXTEST-26-T1", side: "ask", count: 1.5, price: 0.8,
+    client, env: open, confirm: true, ticker: "KXTEST-26-T1", side: "ask", count: 1.5, price: 0.8, research: research(),
   });
   assert.equal(placed.placed, true);
   assert.equal(calls[0][1].side, "ask");
@@ -70,21 +71,24 @@ test("place refuses size over the caps and still records what it sent", async ()
   };
   const env = { KALSHI_SAFE_MODE: "0" };
   await assert.rejects(() => placeOrder({
-    client, env, ledger, confirm: true, ticker: "KXTEST-26-T1", side: "bid", count: 20, price: 0.5,
+    client, env, ledger, confirm: true, ticker: "KXTEST-26-T1", side: "bid", count: 20, price: 0.5, research: research(),
   }), /profitable/);
   assert.equal(calls.length, 0);
 
   await placeOrder({
-    client, env, ledger, confirm: true, ticker: "KXTEST-26-T1", side: "bid", count: 5, price: 0.2,
+    client, env, ledger, confirm: true, ticker: "KXTEST-26-T1", side: "bid", count: 10, price: 0.2,
+    research: research({ corr_group: "city_weather_week" }),
   });
   await placeOrder({
-    client, env, ledger, confirm: true, ticker: "KXTEST-26-T2", side: "bid", count: 5, price: 0.2,
+    client, env, ledger, confirm: true, ticker: "KXTEST-26-T2", side: "bid", count: 10, price: 0.2,
+    research: research({ corr_group: "fed_path" }),
   });
   await assert.rejects(() => placeOrder({
     client, env, ledger, confirm: true, ticker: "KXTEST-26-T3", side: "bid", count: 50, price: 0.2,
+    research: research({ corr_group: "nfl_week_n" }),
   }), /daily/);
   assert.equal(calls.length, 2);
-  assert.equal(ledger.snapshot().daily, 2);
+  assert.equal(ledger.snapshot().daily, 4);
 });
 
 test("parallel orders cannot slip past the daily cap", async () => {
@@ -99,7 +103,7 @@ test("parallel orders cannot slip past the daily cap", async () => {
     },
   };
   const env = { KALSHI_SAFE_MODE: "0" };
-  const results = await Promise.allSettled([...Array(11).keys()].map((i) => placeOrder({
+  const results = await Promise.allSettled([...Array(6).keys()].map((i) => placeOrder({
     client,
     env,
     ledger,
@@ -107,12 +111,13 @@ test("parallel orders cannot slip past the daily cap", async () => {
     confirm: true,
     ticker: `KXPAR-${i}`,
     side: "bid",
-    count: 5,
+    count: 10,
     price: 0.2,
+    research: research({ corr_group: `driver_${i}` }),
   })));
   const placed = results.filter((result) => result.status === "fulfilled");
-  assert.equal(placed.length, 10);
-  assert.equal(calls.length, 10);
+  assert.equal(placed.length, 5);
+  assert.equal(calls.length, 5);
   assert.equal(ledger.snapshot().daily, 10);
 });
 
@@ -135,6 +140,7 @@ test("exit closes a long even when the daily cap is full", async () => {
     confirm: true,
     ticker: "KXTEST-26-T1",
     price: 0.4,
+    falsifierHit: true,
   });
   assert.equal(exited.exited, true);
   assert.equal(calls[0].side, "ask");
@@ -177,7 +183,7 @@ test("amend cannot grow past the small default until the sleeve has won, decreas
   };
   const env = { KALSHI_SAFE_MODE: "0" };
   await assert.rejects(() => amendOrder({
-    client, env, confirm: true, orderId: "abc12345", ticker: "KXTEST-26-T1", side: "bid", price: 0.1, count: 20,
+    client, env, confirm: true, orderId: "abc12345", ticker: "KXTEST-26-T1", side: "bid", price: 0.1, count: 40,
   }), /profitable/);
   assert.equal(calls.length, 0);
 
@@ -252,9 +258,11 @@ test("a profitable sleeve can size up, and nothing clears the hard max", async (
   };
   await assert.rejects(() => placeOrder({
     client, env, confirm: true, ticker: "KXNEW-1", side: "bid", count: 20, price: 0.8,
+    research: research({ p_model: 0.95, corr_group: "fed_path" }),
   }), /hard max/);
   const placed = await placeOrder({
     client, env, confirm: true, ticker: "KXNEW-1", side: "bid", count: 100, price: 0.15,
+    research: research({ corr_group: "city_weather_week" }),
   });
   assert.equal(placed.notional, 15);
   assert.equal(calls[0].count, "100.00");

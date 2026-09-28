@@ -84,9 +84,10 @@ test("tool list is read-heavy and find_best_bets returns named keys", async () =
     assert.equal(payload.safe_mode, true);
     assert.equal(payload.policy.auto_trade, true);
     assert.equal(payload.policy.scan_places_orders, false);
-    assert.equal(payload.recommendations[0].lane, "asymmetric");
+    assert.equal(payload.recommendations[0].maker_flag, false);
     assert.equal(payload.win_history.allows_scale, false);
-    assert.ok(payload.recommendations[0].suggested_dollars <= 1);
+    assert.ok(payload.recommendations[0].suggested_dollars <= 2);
+    assert.equal(payload.recommendations[0].corr_group, "city_weather_week");
     const balance = await client.callTool({ name: "get_balance", arguments: {} });
     assert.equal(JSON.parse(balance.content[0].text).balance, 2500);
     assert.equal(kalshi.calls.includes("create"), false);
@@ -128,7 +129,19 @@ test("live sleeve rejects an oversized order and still exits", async () => {
     });
     const blocked = await client.callTool({
       name: "place_order",
-      arguments: { confirm: true, ticker: "KXTEST-26-T1", side: "bid", count: 20, price: 0.5 },
+      arguments: {
+        confirm: true,
+        ticker: "KXTEST-26-T1",
+        side: "bid",
+        count: 20,
+        price: 0.5,
+        p_model: 0.8,
+        category_tag: "Weather",
+        corr_group: "city_weather_week",
+        model_sources: "GFS+ECMWF ensemble versus the station",
+        settlement_match_score: 1,
+        horizon_days: 5,
+      },
     });
     assert.equal(blocked.isError, true);
     assert.match(blocked.content[0].text, /CAP/);
@@ -136,7 +149,19 @@ test("live sleeve rejects an oversized order and still exits", async () => {
 
     const placed = await client.callTool({
       name: "place_order",
-      arguments: { confirm: true, ticker: "KXOTHER-1", side: "bid", count: 2, price: 0.5 },
+      arguments: {
+        confirm: true,
+        ticker: "KXOTHER-1",
+        side: "bid",
+        count: 4,
+        price: 0.5,
+        p_model: 0.8,
+        category_tag: "Weather",
+        corr_group: "fed_path",
+        model_sources: "GFS+ECMWF ensemble versus the station",
+        settlement_match_score: 1,
+        horizon_days: 5,
+      },
     });
     assert.equal(placed.isError, undefined);
     const review = await client.callTool({
@@ -144,11 +169,11 @@ test("live sleeve rejects an oversized order and still exits", async () => {
       arguments: { positions: [{ ticker: "KXTEST-26-T1", cost: 1, mark: 1.6 }] },
     });
     const reviewed = JSON.parse(review.content[0].text);
-    assert.equal(reviewed.reviews[0].action, "take_profit");
+    assert.equal(reviewed.reviews[0].action, "hold");
 
     const exited = await client.callTool({
       name: "exit_position",
-      arguments: { confirm: true, ticker: "KXTEST-26-T1", price: 0.4 },
+      arguments: { confirm: true, ticker: "KXTEST-26-T1", price: 0.4, falsifier_hit: true },
     });
     assert.equal(exited.isError, undefined);
     assert.equal(kalshi.calls.filter((call) => call === "create").length, 2);

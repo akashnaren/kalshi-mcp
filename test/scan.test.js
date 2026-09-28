@@ -46,11 +46,14 @@ test("scan pages only up to the cap and ranks the liquid cheap side", async () =
   assert.deepEqual(result.recommendations.map((row) => row.ticker), ["PAGE-2", "PAGE-1"]);
   assert.equal(result.policy.auto_trade, true);
   assert.equal(result.policy.scan_places_orders, false);
-  assert.equal(result.recommendations[0].lane, "asymmetric");
+  assert.equal(result.recommendations[0].lane, "taker");
   assert.equal(result.win_history.allows_scale, false);
-  assert.ok(result.recommendations[0].suggested_dollars <= 1);
+  assert.equal(result.calibration.polymarket_is_not_kalshi, true);
+  assert.equal(result.calibration.source, "kalshi_fills");
+  assert.ok(result.recommendations[0].suggested_dollars <= 2);
   assert.ok(result.recommendations[0].suggested_dollars > 0);
-  assert.equal(result.policy.score, "confidence * payout / stake");
+  assert.equal(result.recommendations[0].edge_net_cents > 0, true);
+  assert.equal(result.policy.score, "edge_net_cents");
   assert.equal(result.recommendations[0].keys[0], "nhc_cone_includes_city");
   assert.equal(result.scanned_markets, 2);
 });
@@ -130,5 +133,5 @@ test("find_best_bets scales only from live winning history", async () => {
   const cold = await findBestBets({ client: broken, signals: [signal()] });
   assert.equal(cold.win_history.allows_scale, false);
   assert.match(cold.book_error, /book down/);
-  assert.ok(cold.recommendations[0].suggested_dollars <= 1);
+  assert.ok(cold.recommendations[0].suggested_dollars <= 2);
 });

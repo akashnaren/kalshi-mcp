@@ -27,6 +27,24 @@ export function signal(overrides = {}) {
     side: "yes",
     detail: "NHC 5-day cone covers Miami as of 15:00Z",
     market_ticker: "KXTEST-26-T1",
+    category_tag: "Weather",
+    corr_group: "city_weather_week",
+    model_sources: "GFS+ECMWF ensemble CDF versus the official station",
+    settlement_match_score: 1,
+    horizon_days: 5,
+    falsifier: "Station forecast revises back through the strike",
+    ...overrides,
+  };
+}
+
+export function research(overrides = {}) {
+  return {
+    p_model: 0.8,
+    category_tag: "Weather",
+    corr_group: "city_weather_week",
+    model_sources: "GFS+ECMWF ensemble CDF versus the official station",
+    settlement_match_score: 1,
+    horizon_days: 5,
     ...overrides,
   };
 }
