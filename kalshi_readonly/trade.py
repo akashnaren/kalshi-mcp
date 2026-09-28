@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import re
 import urllib.parse
+
 from decimal import Decimal
 
+from kalshi_readonly.caps import enforce_open, note_open, opening_notional, summarize_book
 from kalshi_readonly.guard import require_mutation
 from kalshi_readonly.http import auth_call, auth_get
 
@@ -145,6 +147,37 @@ def _subaccount_query(args: dict) -> dict[str, object]:
     return query
 
 
+def _optional_group(args: dict) -> str | None:
+    if "corr_group" not in args or args["corr_group"] in (None, ""):
+        return None
+    value = args["corr_group"]
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_]{2,48}", value):
+        raise RuntimeError("corr_group must be a snake_case risk driver")
+    return value
+
+
+def _load_book() -> dict:
+    positions = auth_get("/portfolio/positions", {"limit": 200})
+    fills = auth_get("/portfolio/fills", {"limit": 200})
+    orders = auth_get("/portfolio/orders", {"status": "resting", "limit": 200})
+    return summarize_book(positions, fills, orders)
+
+
+def _guard_open(*, ticker: str, side: str, count: str, price: str, corr_group: str | None, reduce_only: bool | None) -> Decimal:
+    if reduce_only is True:
+        return Decimal(0)
+    notional = opening_notional(side, Decimal(count), Decimal(price))
+    entry = Decimal(price) if side == "bid" else Decimal(1) - Decimal(price)
+    try:
+        book = _load_book()
+    except RuntimeError as exc:
+        if str(exc).startswith("auth required"):
+            raise
+        raise RuntimeError(f"refusing to add risk because the book could not be loaded: {exc}") from None
+    enforce_open(notional=notional, price=entry, ticker=ticker, book=book, corr_group=corr_group)
+    return notional
+
+
 def list_open_orders(args: dict | None = None) -> dict:
     """Read resting orders. Does not require confirm and does not mutate."""
     args = args or {}
@@ -203,7 +236,22 @@ def place_order(args: dict | None = None) -> dict:
     exchange_index = _optional_int(args, "exchange_index", -1, 63)
     if exchange_index is not None:
         body["exchange_index"] = exchange_index
-    return auth_call("POST", "/portfolio/events/orders", body=body)
+    corr_group = _optional_group(args)
+    notional = _guard_open(
+        ticker=ticker,
+        side=side,
+        count=count,
+        price=price,
+        corr_group=corr_group,
+        reduce_only=reduce_only,
+    )
+    try:
+        result = auth_call("POST", "/portfolio/events/orders", body=body)
+    except RuntimeError:
+        raise
+    if notional > 0:
+        note_open(ticker=ticker, notional=notional, corr_group=corr_group, client_order_id=client_order_id)
+    return result
 
 
 def cancel_order(args: dict | None = None) -> dict:
@@ -239,6 +287,14 @@ def amend_order(args: dict | None = None) -> dict:
     exchange_index = _optional_int(args, "exchange_index", -1, 63)
     if exchange_index is not None:
         body["exchange_index"] = exchange_index
+    _guard_open(
+        ticker=str(body["ticker"]),
+        side=str(body["side"]),
+        count=str(body["count"]),
+        price=str(body["price"]),
+        corr_group=_optional_group(args),
+        reduce_only=False,
+    )
     return auth_call("POST", _order_path(order_id, "/amend"), _subaccount_query(args) or None, body)
 
 
@@ -284,7 +340,10 @@ OPEN_ORDERS_TOOL = {
 
 _MUTATION_NOTE = (
     "Requires KALSHI_SAFE_MODE=0 and confirm=true (boolean). "
-    "The server never sets confirm. There is no dollar max. No withdraw or deposit."
+    "The server never sets confirm. "
+    "Opening risk is capped at a $2 default, a $15 hard max, 15% of the sleeve in one market, "
+    "and 30% in one corr_group. Size above $2 needs a profitable fill history. "
+    "Prices under 25 cents stay at $2. No withdraw or deposit."
 )
 
 MUTATING_TOOLS = [
@@ -320,6 +379,7 @@ MUTATING_TOOLS = [
                 "subaccount": {"type": "integer"},
                 "order_group_id": {"type": "string"},
                 "exchange_index": {"type": "integer"},
+                "corr_group": {"type": "string", "description": "Snake_case risk driver. Shares a 30% sleeve cap."},
                 "confirm": _CONFIRM,
             },
             "required": [

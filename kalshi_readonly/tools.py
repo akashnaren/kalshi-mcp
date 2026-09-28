@@ -13,6 +13,7 @@ from kalshi_readonly.http import auth_get, public_get
 from kalshi_readonly.report import present_balance, present_fills, present_positions
 from kalshi_readonly.stdio import run_server
 from kalshi_readonly.recommend import FIND_BEST_TOOL, find_best_bets
+from kalshi_readonly.routine import fe_routine
 from kalshi_readonly.trade import (
     MUTATING_HANDLERS,
     MUTATING_TOOLS,
@@ -116,12 +117,22 @@ READ_TOOLS = [
             },
         },
     },
+    {
+        "name": "fe_routine",
+        "description": (
+            "Finance Engineer daily and end-of-day routine. Read only. "
+            "Does not place, cancel, amend, or decrease. "
+            "Use with find_best_bets, then place_order only when KALSHI_SAFE_MODE=0, confirm is true, and the caps allow it."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]
 
 HANDLERS = {
     "exchange_status": exchange_status,
     "list_markets": list_markets,
     "find_best_bets": find_best_bets,
+    "fe_routine": fe_routine,
     "cash_or_positions": cash_or_positions,
     "list_open_orders": list_open_orders,
     **MUTATING_HANDLERS,

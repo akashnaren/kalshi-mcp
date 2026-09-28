@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from kalshi_readonly.auth import AUTH_ERROR
+from kalshi_readonly.caps import reset_ledger
 from kalshi_readonly.guard import CONFIRM_ERROR, SAFE_MODE_ERROR
 from kalshi_readonly.stdio import run_server
 from kalshi_readonly.tools import HANDLERS, registered_tools
@@ -23,6 +24,13 @@ from kalshi_readonly.trade import (
     list_open_orders,
     place_order,
 )
+
+@pytest.fixture(autouse=True)
+def _clear_ledger():
+    reset_ledger()
+    yield
+    reset_ledger()
+
 
 _PLACE = {
     "ticker": "KXTEST",
@@ -146,7 +154,14 @@ def test_safe_mode_defaults_on_and_hides_mutations(monkeypatch: pytest.MonkeyPat
     else:
         monkeypatch.setenv("KALSHI_SAFE_MODE", raw)
     names = [tool["name"] for tool in registered_tools()]
-    assert names == ["exchange_status", "list_markets", "find_best_bets", "cash_or_positions", "list_open_orders"]
+    assert names == [
+        "exchange_status",
+        "list_markets",
+        "find_best_bets",
+        "cash_or_positions",
+        "fe_routine",
+        "list_open_orders",
+    ]
     assert set(HANDLERS) >= {"place_order", "cancel_order", "amend_order", "decrease_order"}
 
 
@@ -215,6 +230,10 @@ def test_missing_auth_fails_closed_before_place(monkeypatch: pytest.MonkeyPatch)
     assert "PRIVATE KEY" not in str(caught.value)
 
 
+def _empty_book() -> _Body:
+    return _Body({"market_positions": [], "event_positions": [], "fills": [], "orders": [], "cursor": ""})
+
+
 def test_place_order_signs_post_and_omits_confirm(monkeypatch: pytest.MonkeyPatch) -> None:
     key = _auth(monkeypatch)
     _enable_trading(monkeypatch)
@@ -223,13 +242,17 @@ def test_place_order_signs_post_and_omits_confirm(monkeypatch: pytest.MonkeyPatc
     def fake_open(req: urllib.request.Request, timeout: float = 20):
         assert timeout == 20
         seen.append(req)
+        if req.get_method() == "GET":
+            return _empty_book()
         return _Body({"order_id": "ord-1", "fill_count": "0.00", "remaining_count": "1.00", "ts_ms": 1})
 
     monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
     out = place_order(_PLACE)
 
-    assert len(seen) == 1
-    req = seen[0]
+    posts = [req for req in seen if req.get_method() == "POST"]
+    assert len(posts) == 1
+    assert any(req.get_method() == "GET" for req in seen)
+    req = posts[0]
     assert req.get_method() == "POST"
     assert urllib.parse.urlparse(req.full_url).path == "/trade-api/v2/portfolio/events/orders"
     body = json.loads(req.data)
@@ -280,6 +303,8 @@ def test_amend_and_decrease_hit_v2_paths(monkeypatch: pytest.MonkeyPatch) -> Non
 
     def fake_open(req: urllib.request.Request, timeout: float = 20):
         seen.append(req)
+        if req.get_method() == "GET":
+            return _empty_book()
         if req.full_url.endswith("/amend"):
             return _Body({"order_id": "ord-1", "remaining_count": "1.00", "ts_ms": 3})
         return _Body({"order_id": "ord-1", "remaining_count": "0.50", "ts_ms": 4})
@@ -297,14 +322,15 @@ def test_amend_and_decrease_hit_v2_paths(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     decrease_order({"order_id": "ord-1", "reduce_to": "0.50", "market_ticker": "KXTEST", "confirm": True})
 
-    assert [urllib.parse.urlparse(req.full_url).path for req in seen] == [
+    posts = [req for req in seen if req.get_method() == "POST"]
+    assert [urllib.parse.urlparse(req.full_url).path for req in posts] == [
         "/trade-api/v2/portfolio/events/orders/ord-1/amend",
         "/trade-api/v2/portfolio/events/orders/ord-1/decrease",
     ]
-    assert json.loads(seen[0].data)["count"] == "2"
-    assert json.loads(seen[0].data)["side"] == "ask"
-    assert "confirm" not in json.loads(seen[0].data)
-    decrease = json.loads(seen[1].data)
+    assert json.loads(posts[0].data)["count"] == "2"
+    assert json.loads(posts[0].data)["side"] == "ask"
+    assert "confirm" not in json.loads(posts[0].data)
+    decrease = json.loads(posts[1].data)
     assert decrease == {"reduce_to": "0.50", "market_ticker": "KXTEST"}
 
 
@@ -342,6 +368,8 @@ def test_place_error_does_not_return_key_material(monkeypatch: pytest.MonkeyPatc
     _enable_trading(monkeypatch)
 
     def fake_open(req: urllib.request.Request, timeout: float = 20):
+        if req.get_method() == "GET":
+            return _empty_book()
         body = b'-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----'
         raise urllib.error.HTTPError(req.full_url, 401, "unauthorized", Message(), io.BytesIO(body))
 
@@ -418,3 +446,21 @@ def test_stdio_hides_trade_tools_and_refuses_a_direct_call(monkeypatch: pytest.M
     assert "list_open_orders" in names
     assert frames[1]["result"]["isError"] is True
     assert SAFE_MODE_ERROR in frames[1]["result"]["content"][0]["text"]
+
+
+def test_place_refuses_the_hard_max_before_sending_the_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    _auth(monkeypatch)
+    _enable_trading(monkeypatch)
+    seen: list[urllib.request.Request] = []
+
+    def fake_open(req: urllib.request.Request, timeout: float = 20):
+        seen.append(req)
+        if req.get_method() == "GET":
+            return _empty_book()
+        raise AssertionError("order was sent")
+
+    monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
+    with pytest.raises(RuntimeError, match=r"hard max \$15"):
+        place_order({**_PLACE, "count": "40", "price": "0.5000"})
+    assert seen
+    assert all(req.get_method() == "GET" for req in seen)
