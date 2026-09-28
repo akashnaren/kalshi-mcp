@@ -155,6 +155,8 @@ def test_routine_names_the_daily_and_eod_hook() -> None:
         "rate_limited",
         "tools/list",
         "npm run build",
+        "KALSHI_SAFE_MODE=1",
+        "no separate Kalshi role harness",
     ):
         assert phrase in FE_ROUTINE
     text = (ROOT / "harness" / "fe-grok-bot-routine.md").read_text(encoding="utf-8")

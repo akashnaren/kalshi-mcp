@@ -1,8 +1,8 @@
 # kalshi-readonly
 
-Kalshi Trade API v2 MCP over stdio. Read tools cover exchange status, markets, cash, positions, and a ranked list of small-stake ideas. Trade tools place, cancel, amend, or decrease one order, and list resting orders.
+Kalshi Trade API v2 MCP over stdio (`kalshi-mcp-v1-readonly-fleet`). Read tools cover exchange status, markets, cash, positions, and a ranked list of small-stake ideas. Trade tools place, cancel, amend, or decrease one order. They are gated behind `KALSHI_SAFE_MODE`. They are not absent from v1.
 
-House default is read-only. Mutating trade tools stay off unless safe mode is turned off. There is no deposit tool, no withdraw tool, and no auto-trading tool. `find_best_bets` never places an order.
+Fleet default is `KALSHI_SAFE_MODE=1`. `tools/list` then omits `place_order`, `cancel_order`, `amend_order`, and `decrease_order`, and those handlers still refuse the call. The Finance Engineer harness (`harness/SKILL.md`) is the only policy that sets `KALSHI_SAFE_MODE=0`, and only on the Finance Engineer host. There is no separate Kalshi role harness. There is no deposit tool, no withdraw tool, and no auto-trading tool. `find_best_bets` never places an order.
 
 ## Run
 
@@ -39,13 +39,22 @@ Signing matches the cash CLI for GET, POST, and DELETE: `timestamp_ms + METHOD +
 
 ## Prove
 
-Point the env vars at the key id file and the PEM. This prints one balance read and does not place orders.
+No-network fleet check. The printed names must include `exchange_status`, `cash_or_positions`, `find_best_bets`, and `fe_routine`, and must omit `place_order`, `cancel_order`, `amend_order`, and `decrease_order`.
+
+```bash
+KALSHI_SAFE_MODE=1 python3 -c 'from kalshi_readonly.tools import registered_tools; print([t["name"] for t in registered_tools()])'
+printf '%s\n' '{"id":1,"op":"list"}' | KALSHI_SAFE_MODE=1 python3 -m kalshi_readonly.dispatch
+```
+
+On the box, after the host is up: call `exchange_status`, then `cash_or_positions` with `include=both`. The same cash read from the CLI, which does not place:
 
 ```bash
 export KALSHI_API_KEY_ID="$(tr -d '[:space:]' < /path/to/key_id)"
 export KALSHI_PRIVATE_KEY_PATH=/path/to/private.pem
 python3 -c 'import json; from kalshi_readonly.tools import cash_or_positions; print(json.dumps(cash_or_positions({"include":"both","limit":5}), indent=2))'
 ```
+
+`~/.secrets/kalshi/key_id` and `private.pem` are enough when those env vars are unset. A host that says Not connected needs `npm run build` and a restart so `node dist/index.js` is the live process. Then `tools/list` is the check.
 
 ## Install as a Cursor plugin
 
@@ -70,14 +79,31 @@ node /absolute/path/to/kalshi-mcp/dist/index.js
 
 Set these in the host env, not on the command line:
 
-- `KALSHI_API_KEY_ID`
-- `KALSHI_PRIVATE_KEY_PATH`
-- `KALSHI_SAFE_MODE=1` for a read-only host
-- `KALSHI_SAFE_MODE=0` for the Finance Engineer sleeve, after install
+- `KALSHI_API_KEY_ID` or `KALSHI_API_KEY_ID_PATH` (default `~/.secrets/kalshi/key_id`)
+- `KALSHI_PRIVATE_KEY_PATH` or `KALSHI_PRIVATE_KEY_PEM` (default `~/.secrets/kalshi/private.pem`)
+- `KALSHI_SAFE_MODE=1` on every fleet host
 
-`KALSHI_SAFE_MODE=1` is the house default. Order tools stay unregistered. `find_best_bets` only reads. Do not commit the key file.
+`KALSHI_SAFE_MODE=1` is the fleet default. Missing or empty stays on. `tools/list` omits `place_order`, `cancel_order`, `amend_order`, and `decrease_order`. `find_best_bets` only reads. Do not commit the key file.
 
-Finance Engineer install, in order:
+```json
+{
+  "mcpServers": {
+    "kalshi-readonly": {
+      "command": "node",
+      "args": ["/absolute/path/to/kalshi-mcp/dist/index.js"],
+      "env": {
+        "KALSHI_API_KEY_ID_PATH": "/absolute/path/to/.secrets/kalshi/key_id",
+        "KALSHI_PRIVATE_KEY_PATH": "/absolute/path/to/.secrets/kalshi/private.pem",
+        "KALSHI_SAFE_MODE": "1"
+      }
+    }
+  }
+}
+```
+
+Omit the path env vars when `~/.secrets/kalshi/key_id` and `private.pem` already exist for that user. Do not commit those files.
+
+Finance Engineer override, and only that host. `harness/SKILL.md` owns the decision. Do not add a second Kalshi role harness. Install, in order:
 
 1. `npm run build` so `dist/index.js` matches this tree.
 2. Point the host at `node /absolute/path/to/kalshi-mcp/dist/index.js` with `KALSHI_SAFE_MODE=0`.
@@ -102,7 +128,7 @@ The Finance Engineer sleeve sets `KALSHI_SAFE_MODE=0` and restarts the host. `pl
 }
 ```
 
-Use `"KALSHI_SAFE_MODE": "1"` when this host should stay read-only. `"0"` is only for the Finance Engineer sleeve. Restart after you change it so the tool list reloads.
+`"KALSHI_SAFE_MODE": "0"` in the block above is the Finance Engineer host only. Every other host stays at `"1"`. Restart after you change it so the tool list reloads. `listChanged` stays false for the life of the process.
 
 ## Cursor
 
@@ -193,7 +219,7 @@ Cancels and decreases do not add risk and are not size-capped. An amend that wou
 - Calling one of those handlers anyway returns an error and does not hit the network.
 - `list_open_orders` stays registered. It is a signed GET of resting orders.
 
-After you set `KALSHI_SAFE_MODE=0`, restart the MCP host so it reloads the tool list. Every mutating call still requires `confirm` to be the boolean `true`. `false`, `"true"`, `1`, and a missing confirm are refused before auth and before HTTP. The confirm flag is not copied into the Kalshi body.
+The Finance Engineer harness is the only unlock. After that host sets `KALSHI_SAFE_MODE=0`, restart it so `tools/list` reloads. Every mutating call still requires `confirm` to be the boolean `true`. `false`, `"true"`, `1`, and a missing confirm are refused before auth and before HTTP. The confirm flag is not copied into the Kalshi body. Fleet hosts do not set `0`.
 
 | Tool | Kalshi route | Required arguments |
 | --- | --- | --- |

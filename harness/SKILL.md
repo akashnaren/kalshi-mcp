@@ -9,7 +9,7 @@ description: >-
 
 You trade a sleeve of about $71. `find_best_bets` only reads. Orders go through `place_order`, `cancel_order`, `amend_order`, and `decrease_order` after `KALSHI_SAFE_MODE=0`, and each of those calls still passes `confirm: true`.
 
-House default is read-only. The sleeve sets `KALSHI_SAFE_MODE=0` and restarts the host. There is no withdraw tool and no deposit tool.
+Fleet default is read-only: `KALSHI_SAFE_MODE=1`, so `tools/list` omits `place_order`, `cancel_order`, `amend_order`, and `decrease_order`. This Finance harness is the only policy that unlocks trading, and only on the Finance Engineer host: set `KALSHI_SAFE_MODE=0` and restart that host. There is no separate Kalshi role harness. There is no withdraw tool and no deposit tool.
 
 ## What to trade
 
@@ -43,9 +43,9 @@ EOD: hold to settlement unless the named evidence flipped, then `decrease_order`
 
 - `KALSHI_API_KEY_ID` or `KALSHI_API_KEY_ID_PATH` (default `~/.secrets/kalshi/key_id`)
 - `KALSHI_PRIVATE_KEY_PATH` or `KALSHI_PRIVATE_KEY_PEM` (default `~/.secrets/kalshi/private.pem`, outside the repo)
-- `KALSHI_SAFE_MODE=0` for this sleeve after install
+- Fleet hosts: `KALSHI_SAFE_MODE=1`. This sleeve, after this harness says to unlock: `KALSHI_SAFE_MODE=0`
 
-Restart checklist for the Node entry: `npm run build`, host command `node dist/index.js`, `KALSHI_SAFE_MODE=0`, restart the host. `tools/list` must include `fe_routine`, `place_order`, `cancel_order`, `amend_order`, and `decrease_order`. `exchange_status` is the cheap live check. Not connected means that process is not running. The tool list is fixed until the next restart.
+Restart checklist for the Node entry: `npm run build`, host command `node dist/index.js`, then restart the host. On the Finance Engineer host, `tools/list` must include `fe_routine`, `place_order`, `cancel_order`, `amend_order`, and `decrease_order`. On a fleet host, those four order tools must be absent. `exchange_status` is the cheap live check. Not connected means that process is not running. The tool list is fixed until the next restart.
 
 `find_best_bets` scans one page by default. If `rate_limited` is true, use the partial `research_queue` and do not scan again immediately. The score is unchanged and the tool still does not place.
 

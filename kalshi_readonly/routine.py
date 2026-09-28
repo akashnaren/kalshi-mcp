@@ -19,7 +19,8 @@ Size is quarter Kelly on the recommendation. The order tools enforce the caps:
 - At most $10 of new notional per UTC day.
 
 Install:
-- npm run build so dist/index.js is current, then point the host at node dist/index.js. KALSHI_SAFE_MODE defaults on. Set KALSHI_SAFE_MODE=0 and restart the host so this sleeve can trade.
+- The fleet host stays at KALSHI_SAFE_MODE=1. This Finance routine is the only unlock. There is no separate Kalshi role harness.
+- npm run build so dist/index.js is current, then point the host at node dist/index.js. Set KALSHI_SAFE_MODE=0 and restart this host so this sleeve can trade.
 - After restart, tools/list must include fe_routine, place_order, cancel_order, amend_order, and decrease_order. exchange_status is the cheap live check. Not connected means that node process is not running.
 - Every place_order, cancel_order, amend_order, and decrease_order still passes confirm:true.
 
