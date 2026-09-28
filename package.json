@@ -1,0 +1,21 @@
+{
+  "name": "kalshi-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Kalshi MCP for Grok Bot. Recommends low-stake, high-payout contracts only when named signals say confidence is high. Safe mode on by default.",
+  "bin": {
+    "kalshi-mcp": "./src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.1",
+    "zod": "4.6.5"
+  }
+}
