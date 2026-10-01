@@ -72,6 +72,10 @@ def _url(path: str, query: dict | None) -> str:
     return f"{base}?{urllib.parse.urlencode(query)}"
 
 
+_DETAIL_KEYS = ("code", "message", "details")
+_DETAIL_CAP = 300
+
+
 def _detail(body: bytes) -> str:
     text = body.decode("utf-8", errors="replace")
     if "PRIVATE KEY" in text or "-----BEGIN" in text:
@@ -82,11 +86,14 @@ def _detail(body: bytes) -> str:
         return ""
     if not isinstance(parsed, dict):
         return ""
-    parts = [parsed.get("code"), parsed.get("message")]
+    source = parsed.get("error")
+    if not isinstance(source, dict):
+        source = parsed
+    parts = [source.get(key) for key in _DETAIL_KEYS]
     detail = ": ".join(part for part in parts if isinstance(part, str) and part)
     if "PRIVATE KEY" in detail or "-----BEGIN" in detail:
         return ""
-    return detail[:300]
+    return detail[:_DETAIL_CAP]
 
 
 def _retry_after_seconds(header: str | None) -> float | None:
