@@ -556,6 +556,8 @@ MUTATING_TOOLS = [
         "name": "place_order",
         "description": (
             "Place one Kalshi order (POST /portfolio/events/orders). "
+            "Kalshi may return HTTP 403 when jurisdiction or market category blocks trading. "
+            "The error text includes Kalshi's code and message. "
             "side is the YES book: bid buys YES, ask sells YES. "
             "price is a YES-side dollar string strictly between 0 and 1. "
             "count is contracts (fixed-point string or integer). "
