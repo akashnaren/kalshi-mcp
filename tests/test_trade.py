@@ -159,6 +159,8 @@ def test_safe_mode_defaults_on_and_hides_mutations(monkeypatch: pytest.MonkeyPat
         "exchange_status",
         "list_markets",
         "find_best_bets",
+        "append_decision",
+        "summarize_decisions",
         "cash_or_positions",
         "fe_routine",
         "list_open_orders",
@@ -276,6 +278,10 @@ def test_place_order_signs_post_and_omits_confirm(monkeypatch: pytest.MonkeyPatc
     assert out["order_id"] == "ord-1"
     assert out["role"] == "taker"
     assert out["fee_cents_est"] == "2"
+    assert out["flb_band"] == "25–75¢"
+    assert out["edge_net_cents"] is None
+    assert out["corr_group"] == "sleeve_test"
+    assert "ledger_fill" not in out
     assert out["day_spend_remaining"] == "9.58"
 
 
@@ -543,3 +549,38 @@ def test_post_only_nfl_uses_catalog_maker_fee(monkeypatch: pytest.MonkeyPatch) -
     assert out["fee_cents_est"] == "1"
     assert out["m_maker"] == "1"
     assert out["fee_m_source"] == "catalog"
+
+
+def test_place_echoes_ledger_fields_and_appends_a_fill(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from pathlib import Path
+
+    monkeypatch.setenv("KALSHI_STATE_DIR", str(tmp_path))
+    _auth(monkeypatch)
+    _enable_trading(monkeypatch)
+    seen: list[urllib.request.Request] = []
+
+    def fake_open(req: urllib.request.Request, timeout: float = 20):
+        seen.append(req)
+        if req.get_method() == "GET":
+            return _empty_book()
+        return _Body({"order": {"order_id": "ord-9", "fill_count_fp": "1.00"}})
+
+    monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
+    decision_id = "20260930-180000-KXTEST-yes-01"
+    out = place_order({**_PLACE, "edge_net_cents": 4.5, "decision_id": decision_id})
+    body = json.loads([req for req in seen if req.get_method() == "POST"][0].data)
+    assert "edge_net_cents" not in body
+    assert "decision_id" not in body
+    assert "confirm" not in body
+    assert out["order_id"] == "ord-9"
+    assert out["fee_cents_est"] == "2"
+    assert out["flb_band"] == "25–75¢"
+    assert out["edge_net_cents"] == "4.5"
+    assert out["corr_group"] == "sleeve_test"
+    assert out["ledger_fill"]["mirror_path"] == "/workspace/state/kalshi/ledger/decisions.jsonl"
+    line = json.loads(Path(out["ledger_fill"]["path"]).read_text(encoding="utf-8"))
+    assert line["action"] == "fill"
+    assert line["order_id"] == "ord-9"
+    assert line["parent_id"] == decision_id
+    assert line["side"] == "yes"
+    assert "$2" in line["notes"]

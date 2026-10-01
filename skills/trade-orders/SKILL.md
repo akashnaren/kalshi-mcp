@@ -19,4 +19,4 @@ Akash has explicitly asked for one order action and named the market, side, size
 ## Validate
 `side` is `bid` (buy YES) or `ask` (sell YES). `price` is a YES-book dollar string between 0 and 1. `count` is a contract count. Amend `count` means filled plus desired remaining. Decrease takes exactly one of `reduce_by` or `reduce_to`. Cancel should include `market_ticker` from the open order. No withdraw or deposit tool exists.
 
-`find_best_bets` is a read. A row from it is not an order. The Finance Engineer host may place that row under the caps with `confirm: true` and `corr_group`. This skill still does not set `confirm`.
+`find_best_bets` is a read. A row from it is not an order. The Finance Engineer host may place that row under the caps with `confirm: true` and `corr_group`. This skill still does not set `confirm`. A successful place echoes `fee_cents_est`, `flb_band`, `edge_net_cents` (only when passed in), `corr_group`, and `order_id`. A fill on that ack is an audit line on the decision ledger. It does not raise the $2 cap.

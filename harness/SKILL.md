@@ -36,7 +36,7 @@ The order tools enforce these. Do not route around them.
 
 Paste `harness/fe-grok-bot-routine.md` into the Grok Bot routine, or call `fe_routine`.
 
-DAILY: `cash_or_positions`, `list_open_orders`, `find_best_bets`, then `place_order` with `confirm: true`. Stop on a cap refusal.
+DAILY: `cash_or_positions`, `list_open_orders`, `find_best_bets`, then `place_order` with `confirm: true`. Stop on a cap refusal. `append_decision` records each place and each scored skip. `summarize_decisions` is the week and life-to-date count. Do not invent N. `list_markets` scouts open liquid singles (multivariate combos and null books are skipped).
 
 EOD: hold to settlement unless the named evidence flipped, then `decrease_order` or `cancel_order` with `confirm: true`.
 

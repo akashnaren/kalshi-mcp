@@ -604,29 +604,77 @@ def _volume_floor(volume_24h: Decimal | None, lifetime: Decimal | None, options:
     return "24h"
 
 
-def _screen(market: dict, side: str, options: Options, now: datetime) -> tuple[dict | None, str | None]:
+_FAIL_GATE = {
+    "skipped_market": "exchange_trading_active",
+    "skipped_expiry": "dtr",
+    "skipped_liquidity": "liquidity",
+    "skipped_price": "price_band",
+    "skipped_confidence": "belief_conf",
+    "skipped_edge": "edge_below_floor",
+    "skipped_fee_blind": "fee_blind",
+    "skipped_settlement": "settlement_match",
+    "skipped_edge_net": "edge_net_nonpositive",
+    "skipped_flb": "flb_band",
+    "skipped_risk": "kelly_zero",
+    "skipped_yes_replicate": "yes_replicate",
+}
+
+
+def _quote_values(screened: dict) -> dict:
+    days = (Decimal(str(screened["hours"])) / _DAY).quantize(Decimal("0.01"))
+    return {
+        "price": _q4(screened["stake"]),
+        "flb_band": flb_band(screened["stake"]),
+        "days_to_res": format(days, "f"),
+    }
+
+
+def _skip_row(belief: dict, reason: str | None, passed: list[str], values: dict | None) -> dict:
+    gate = _FAIL_GATE.get(reason or "", reason or "skipped_market")
+    row = {
+        "ticker": belief["ticker"],
+        "side": belief["side"],
+        "failed_gate": gate,
+        "gates_failed": [gate],
+        "gates_passed": list(passed),
+    }
+    for key, value in (values or {}).items():
+        if value is not None:
+            row[key] = value
+    return row
+
+
+def _screen(market: dict, side: str, options: Options, now: datetime) -> tuple[dict | None, str | None, list[str], dict]:
     """Shared liquidity, time, and price checks. Confidence is applied by the caller."""
+    passed = ["beliefs_present"]
     if not _tradable(market):
-        return None, "skipped_market"
+        return None, "skipped_market", passed, {}
+    passed.append("exchange_trading_active")
     expiry = _expiry(market, now)
     if expiry is None:
-        return None, "skipped_expiry"
+        return None, "skipped_expiry", passed, {}
     hours, close_time = expiry
     if hours < float(options.min_hours) or hours > float(options.max_hours):
-        return None, "skipped_expiry"
+        return None, "skipped_expiry", passed, {}
+    passed.append("dtr")
     volume_24h, lifetime = _volumes(market)
     if not _volume_ok(volume_24h, lifetime, options):
-        return None, "skipped_liquidity"
+        return None, "skipped_liquidity", passed, {}
     stake, ask_size = _side_quote(market, side)
     bid = _price(market, "yes_bid_dollars", "yes_bid") if side == "yes" else _price(market, "no_bid_dollars", "no_bid")
+    price_values: dict = {}
+    if stake is not None:
+        price_values = {"price": _q4(stake), "flb_band": flb_band(stake)}
     if stake is None or stake < options.min_price or stake >= options.price_ceiling or stake > options.max_price:
-        return None, "skipped_price"
+        return None, "skipped_price", passed, price_values
     notional = _notional(market)
     profit = notional - stake
     if profit <= 0:
-        return None, "skipped_price"
+        return None, "skipped_price", passed, price_values
+    passed.append("price_band")
     if ask_size is None or ask_size < options.min_ask_size:
-        return None, "skipped_liquidity"
+        return None, "skipped_liquidity", passed, price_values
+    passed.append("liquidity")
     return {
         "hours": hours,
         "close_time": close_time,
@@ -639,25 +687,32 @@ def _screen(market: dict, side: str, options: Options, now: datetime) -> tuple[d
         "notional": notional,
         "profit": profit,
         "title": _title(market, side),
-    }, None
+    }, None, passed, {}
 
 
-def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[dict | None, str | None]:
+def _row(
+    market: dict,
+    belief: dict,
+    screened: dict,
+    options: Options,
+    passed: list[str],
+) -> tuple[dict | None, str | None, dict]:
+    values = _quote_values(screened)
     confidence: Decimal = belief["confidence"]
     if confidence < options.min_confidence:
-        return None, "skipped_confidence"
+        return None, "skipped_confidence", values
     implied = screened["stake"] / screened["notional"]
     edge = confidence - implied
     if edge < options.min_edge:
-        return None, "skipped_edge"
+        return None, "skipped_edge", values
     text_blob = " ".join(
         part for part in (belief.get("evidence"), belief.get("model_sources")) if isinstance(part, str)
     )
     if _FEE_BLIND.search(text_blob):
-        return None, "skipped_fee_blind"
+        return None, "skipped_fee_blind", values
     match = belief.get("settlement_match_score")
     if match is not None and match < 1:
-        return None, "skipped_settlement"
+        return None, "skipped_settlement", values
     payload_m = series_multiplier(market)
     m_taker, m_maker, fee_source = series_fees(market)
     exec_side = side_exec_for(screened["stake"], screened.get("bid"))
@@ -675,7 +730,8 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
         multiplier=m_taker,
     )
     if net_cents <= 0:
-        return None, "skipped_edge_net"
+        values["edge_net_cents"] = format(net_cents, "f")
+        return None, "skipped_edge_net", values
     band = flb_band(screened["stake"])
     dollar_cap = options.max_risk
     if band in {"<10¢", "10–25¢"}:
@@ -685,14 +741,17 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
             allow_longshot=belief.get("allow_longshot") is True,
             net_cents=net_cents,
         ):
-            return None, "skipped_flb"
+            values["edge_net_cents"] = format(net_cents, "f")
+            return None, "skipped_flb", values
         if exec_side != "taker" and net_cents < LONGSHOT_NET_CENTS:
-            return None, "skipped_flb"
+            values["edge_net_cents"] = format(net_cents, "f")
+            return None, "skipped_flb", values
     affordable = int((dollar_cap / screened["stake"]).to_integral_value(rounding=ROUND_DOWN))
     size_cap = int(screened["ask_size"].to_integral_value(rounding=ROUND_DOWN))
     contracts = min(affordable, size_cap)
     if contracts < 1:
-        return None, "skipped_risk"
+        values["edge_net_cents"] = format(net_cents, "f")
+        return None, "skipped_risk", values
     risk = screened["stake"] * Decimal(contracts)
     payout_ratio = screened["profit"] / screened["stake"]
     score = score_formula(confidence, payout_ratio, screened["stake"])
@@ -787,10 +846,29 @@ def _row(market: dict, belief: dict, screened: dict, options: Options) -> tuple[
     gap = belief.get("wx_gap_pp")
     if isinstance(gap, Decimal):
         row["wx_gap_pp"] = _plain(gap)
-    return row, None
+    gates = list(passed) + [
+        "belief_conf",
+        "edge_floor",
+        "fee_aware",
+        "settlement_match",
+        "edge_net",
+        "flb_band",
+        "kelly",
+        "side_exec",
+    ]
+    if days > 14:
+        row["dtr_note"] = "soft_penalize_>14"
+    row["gates_passed"] = gates
+    row["gates_failed"] = []
+    row["failed_gate"] = None
+    return row, None, {}
 
 
-def _drop_dominated_yes(ranked: list[dict], by_ticker: dict[str, dict], counts: dict[str, int]) -> list[dict]:
+def _drop_dominated_yes(
+    ranked: list[dict],
+    by_ticker: dict[str, dict],
+    counts: dict[str, int],
+) -> tuple[list[dict], list[dict]]:
     """Drop a yes buy when the yes mids in that event sum above 1 plus fees."""
     legs: dict[str, list[tuple[str, Decimal, Decimal]]] = {}
     for market in by_ticker.values():
@@ -819,14 +897,33 @@ def _drop_dominated_yes(ranked: list[dict], by_ticker: dict[str, dict], counts: 
             if ticker != best[0]:
                 dominated.add(ticker)
     kept: list[dict] = []
+    skipped: list[dict] = []
     for row in ranked:
         if row.get("side") == "yes" and row.get("ticker") in dominated:
             counts["skipped_yes_replicate"] += 1
+            skipped.append(
+                {
+                    "ticker": row.get("ticker"),
+                    "side": row.get("side"),
+                    "failed_gate": "yes_replicate",
+                    "gates_failed": ["yes_replicate"],
+                    "gates_passed": list(row.get("gates_passed") or []),
+                    "edge_net_cents": row.get("edge_net_cents"),
+                    "flb_band": row.get("flb_band"),
+                    "days_to_res": row.get("days_to_res"),
+                    "price": row.get("stake_needed"),
+                }
+            )
             continue
         if row.get("side") == "yes" and row.get("ticker") in cheaper:
             row["yes_no_replicate"] = "cheaper_leg"
+        if row.get("side") == "yes":
+            gates = list(row.get("gates_passed") or [])
+            if "yes_replicate" not in gates:
+                gates.append("yes_replicate")
+            row["gates_passed"] = gates
         kept.append(row)
-    return kept
+    return kept, skipped
 
 
 def rank_markets(
@@ -834,7 +931,7 @@ def rank_markets(
     beliefs: list[dict],
     options: Options,
     now: datetime,
-) -> tuple[list[dict], dict[str, int], list[str]]:
+) -> tuple[list[dict], dict[str, int], list[str], list[dict]]:
     by_ticker: dict[str, dict] = {}
     for market in markets:
         if not isinstance(market, dict):
@@ -845,22 +942,36 @@ def rank_markets(
     counts = _empty_counts(len(by_ticker))
     missing: list[str] = []
     ranked: list[dict] = []
+    skipped: list[dict] = []
     for belief in beliefs:
         market = by_ticker.get(belief["ticker"])
         if market is None:
             missing.append(belief["ticker"])
             counts["missing"] += 1
+            skipped.append(
+                {
+                    "ticker": belief["ticker"],
+                    "side": belief["side"],
+                    "failed_gate": "ticker_missing",
+                    "gates_failed": ["ticker_missing"],
+                    "gates_passed": ["beliefs_present"],
+                    "note": "ticker was not in the market response",
+                }
+            )
             continue
-        screened, reason = _screen(market, belief["side"], options, now)
+        screened, reason, passed, values = _screen(market, belief["side"], options, now)
         if screened is None:
             counts[reason or "skipped_market"] += 1
+            skipped.append(_skip_row(belief, reason, passed, values))
             continue
-        row, reason = _row(market, belief, screened, options)
+        row, reason, values = _row(market, belief, screened, options, passed)
         if row is None:
             counts[reason or "skipped_market"] += 1
+            skipped.append(_skip_row(belief, reason, passed, values))
             continue
         ranked.append(row)
-    ranked = _drop_dominated_yes(ranked, by_ticker, counts)
+    ranked, dominated = _drop_dominated_yes(ranked, by_ticker, counts)
+    skipped.extend(dominated)
     # Maker quotes whose taker fee is within 2 cents sort one score quantum ahead.
     # The displayed score stays estimated_confidence * payout_ratio / stake_needed.
     ranked.sort(
@@ -883,7 +994,7 @@ def rank_markets(
         row.pop("_score", None)
         row.pop("_edge", None)
         row.pop("_maker_near", None)
-    return shown, counts, missing
+    return shown, counts, missing, skipped
 
 
 def research_queue(markets: list[dict], options: Options, now: datetime) -> tuple[list[dict], dict[str, int]]:
@@ -912,7 +1023,7 @@ def research_queue(markets: list[dict], options: Options, now: datetime) -> tupl
         offers: list[tuple[str, Decimal]] = []
         reasons: list[str] = []
         for side in ("yes", "no"):
-            screened, reason = _screen(market, side, options, now)
+            screened, reason, _passed, _values = _screen(market, side, options, now)
             if screened is None:
                 if reason:
                     reasons.append(reason)
