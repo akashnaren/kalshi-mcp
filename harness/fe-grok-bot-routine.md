@@ -34,9 +34,9 @@ Install:
 
 DAILY:
 1. Call cash_or_positions and list_open_orders.
-2. Call find_best_bets. Pass beliefs only when you can name the evidence. Read edge_net_cents, flb_band, kelly_frac, stake_mode, side_exec, days_to_res, spread_cents, depth_at_ask, fee_cents_est, corr_group_hint, hold_to_res_default, and suggested_max_dollars_risked. If rate_limited is true, use the partial research_queue and do not scan again immediately.
-3. place_order with confirm:true and corr_group inside the caps, best score first. Prefer post_only true and time_in_force good_till_canceled when side_exec is maker. Stop when a call returns a cap refusal.
-4. Tell the human what you placed and what you skipped.
+2. Call find_best_bets. Pass beliefs only when you can name the evidence. Read edge_net_cents, flb_band, kelly_frac, stake_mode, side_exec, days_to_res, spread_cents, depth_at_ask, fee_cents_est, corr_group_hint, hold_to_res_default, gates_passed, gates_failed, and suggested_max_dollars_risked. If rate_limited is true, use the partial research_queue and do not scan again immediately. list_markets scouts open liquid singles and skips multivariate combos and null books.
+3. place_order with confirm:true and corr_group inside the caps, best score first. Prefer post_only true and time_in_force good_till_canceled when side_exec is maker. Stop when a call returns a cap refusal. Read fee_cents_est, flb_band, edge_net_cents, corr_group, and order_id on the response.
+4. Tell the human what you placed and what you skipped. append_decision records each place and each scored skip. summarize_decisions reports the week and life-to-date counts. Do not invent N.
 
 EOD:
 1. Read positions and resting orders. Default action is hold to settlement.

@@ -39,7 +39,7 @@ Signing matches the cash CLI for GET, POST, and DELETE: `timestamp_ms + METHOD +
 
 ## Prove
 
-No-network fleet check. The printed names must include `exchange_status`, `cash_or_positions`, `find_best_bets`, and `fe_routine`, and must omit `place_order`, `cancel_order`, `amend_order`, and `decrease_order`.
+No-network fleet check. The printed names must include `exchange_status`, `cash_or_positions`, `find_best_bets`, `append_decision`, `summarize_decisions`, and `fe_routine`, and must omit `place_order`, `cancel_order`, `amend_order`, and `decrease_order`.
 
 ```bash
 KALSHI_SAFE_MODE=1 python3 -c 'from kalshi_readonly.tools import registered_tools; print([t["name"] for t in registered_tools()])'
@@ -155,7 +155,9 @@ The Finance Engineer sleeve sets `KALSHI_SAFE_MODE=0` and restarts the host. `pl
 | Tool | What it does |
 | --- | --- |
 | `exchange_status` | Public exchange status |
-| `list_markets` | Public markets. Optional `limit` (default 5), `status`, `ticker` |
+| `list_markets` | Public markets for liquid singles. Default `limit` 25, `status=open`, `mve_filter=exclude`, `liquid=true` (drop null yes bid and yes ask). Follows an empty page up to 4 times. Optional `cursor`, `series_ticker`, `event_ticker`, `ticker`. `category` is a client prefix filter (sports, weather, politics, crypto, macro, other), not a Kalshi parameter. `mve_filter=all` and `liquid=false` and `status=any` widen the page |
+| `append_decision` | Validate one place, skip, or outcome and append it to the JSONL ledger. Does not trade. Does not rewrite history |
+| `summarize_decisions` | Week and life-to-date stats from that ledger only. Does not invent N |
 | `find_best_bets` | Read-only rank. See Bets. Does not place orders. Rows include `edge_net_cents`, `flb_band`, `kelly_frac`, `stake_mode`, `side_exec`, `days_to_res`, `spread_cents`, `depth_at_ask`, `fee_cents_est`, `corr_group_hint`, and `hold_to_res_default`. `rate_limited` is true when a later scan page hit the retry budget |
 | `fe_routine` | Daily and end-of-day prompt for the Finance Engineer. Does not trade |
 | `cash_or_positions` | Cash and positions. `include`: `balance`, `cash`, `positions`, `both` (default), or `fills`. Optional `limit` (default 50) |
@@ -200,7 +202,25 @@ HTTP 429 and 503 are tried at most 3 times. A `Retry-After` value is honored up 
 
 `fee_cents_est` is the official schedule for the suggested role, looked up by series prefix before the score: taker `ceil(M_taker * 0.07 * C * P * (1-P) * 100)` cents, maker `ceil(M_maker * 0.0175 * C * P * (1-P) * 100)`. At P=0.50, C=1, M_taker=1 the raw taker amount is 1.75 cents and the round-up is 2 cents. NFL, MLB, Fed, and CPI are usually M_taker=1 and M_maker=1. Weather (`KXHIGH`) is M_taker=1 and M_maker=0 by inference, because those series are absent from the Non-Standard table. Some crypto year-end series (`KXBTCY`, `KXETHY`) are 0/0. An unlisted series stays taker 1 and maker 0. A payload `fee_multiplier` (also `series_fee_multiplier` or `fee_multiplier_fp`) overrides both sides. `edge_net_cents` subtracts that taker dome, half the spread, and a depth haircut (0 when the ask shows at least 3 contracts, otherwise the shortfall capped at 2 cents). `maker_flag` is true when `side_exec` is `maker`. `hold_to_res_default` is true when days to resolution are at most 7 and the round-trip fee is larger than the remaining edge. There is no settlement fee and no fixed take-profit percent. `wx_gap_pp` is copied onto the row only when a belief passes it. It is not an entry gate.
 
-Every response includes `places_orders: false` and the sentence `Finance Engineer may place under the caps with confirm true`. The tool still does not place. Each ranked row reports `edge_net_cents` after the taker fee dome (`ceil(M_taker * 0.07 * contracts * price * (1 - price))` cents), `flb_band`, `kelly_frac` of 0.25, `stake_mode`, `side_exec` / `SIDE_EXEC`, `days_to_res` / `DAYS_TO_RES`, `spread_cents`, `depth_at_ask`, `fee_cents_est`, `m_taker`, `m_maker`, `fee_m_source`, `corr_group_hint`, and `hold_to_res_default` / `HOLD_TO_RES_DEFAULT`. `min_edge` (default 0.08) is probability points and is separate from `edge_net_cents`. A row with `edge_net_cents` at or below 0 is dropped after the fee, the spread, and the depth haircut. A taker quote in the `<10¢` band is dropped unless the belief sets `allow_longshot` true, `edge_net_cents` is at least 8, and the suggested stake is forced to $2. A `10–25¢` quote uses `stake_mode` `fixed_2` and caps `suggested_max_dollars_risked` at $2. Lifetime volume of at least 1000 passes; 24h `min_volume` is the weaker proxy, and both numbers are on the row. A maker quote whose taker fee is within 2 cents sorts 0.0001 ahead of an equal score. The displayed score stays the formula. `max_price` defaults to 0.84, the hard ceiling, so a 50¢–84¢ contract with edge is eligible. The previous default of 0.50 hid that band; pass `max_price` 0.50 to restore it. The Finance Engineer routine is `fe_routine` and `harness/fe-grok-bot-routine.md`.
+Every response includes `places_orders: false` and the sentence `Finance Engineer may place under the caps with confirm true`. The tool still does not place. Each ranked row reports `gates_passed` and `gates_failed` (empty on a pass), plus `edge_net_cents` after the taker fee dome (`ceil(M_taker * 0.07 * contracts * price * (1 - price))` cents), `flb_band`, `kelly_frac` of 0.25, `stake_mode`, `side_exec` / `SIDE_EXEC`, `days_to_res` / `DAYS_TO_RES`, `spread_cents`, `depth_at_ask`, `fee_cents_est`, `m_taker`, `m_maker`, `fee_m_source`, `corr_group_hint`, and `hold_to_res_default` / `HOLD_TO_RES_DEFAULT`. `min_edge` (default 0.08) is probability points and is separate from `edge_net_cents`. A row with `edge_net_cents` at or below 0 is dropped after the fee, the spread, and the depth haircut. A taker quote in the `<10¢` band is dropped unless the belief sets `allow_longshot` true, `edge_net_cents` is at least 8, and the suggested stake is forced to $2. A `10–25¢` quote uses `stake_mode` `fixed_2` and caps `suggested_max_dollars_risked` at $2. Lifetime volume of at least 1000 passes; 24h `min_volume` is the weaker proxy, and both numbers are on the row. A maker quote whose taker fee is within 2 cents sorts 0.0001 ahead of an equal score. The displayed score stays the formula. `max_price` defaults to 0.84, the hard ceiling, so a 50¢–84¢ contract with edge is eligible. The previous default of 0.50 hid that band; pass `max_price` 0.50 to restore it. The Finance Engineer routine is `fe_routine` and `harness/fe-grok-bot-routine.md`.
+
+## Decision ledger
+
+`append_decision` and `summarize_decisions` are reads of local state. They stay on `tools/list` while `KALSHI_SAFE_MODE=1`. They do not place orders.
+
+The ledger is append-only JSONL. A later settlement is a new line with `action` `outcome` and `parent_id`. The server never rewrites an earlier line. The latest outcome for a `parent_id` is the one that counts.
+
+Plugin path: `KALSHI_STATE_DIR` (default `~/.local/state/kalshi`) plus `ledger/decisions.jsonl`. `KALSHI_LEDGER_PATH` overrides that file. Finance Engineer mirrors it to `/workspace/state/kalshi/ledger/decisions.jsonl`. `summarize_decisions` regenerates `stats-weekly-YYYY-Www.json` and `stats-ltd.json` beside the ledger. Those two files are rewritten. The JSONL is not.
+
+`summarize_decisions` reports `n_places`, `n_skips`, and `n_resolved` from the lines on disk. `hit_rate` is wins divided by wins plus losses, and it is null when that denominator is 0. `roi_after_fees` is realized pnl divided by parent stake, and it is null when stake is missing. Brier and log-score are null until 20 binary outcomes. N under 10 is counts and P&L only (`claim_level` `counts_and_pnl_only`). N under 30 labels Bürgi maker/taker and the fee dome as external priors and does not treat them as this sleeve's track record. Concurrent corr_group percent is null because sleeve cash is not on the ledger.
+
+`find_best_bets` puts `gates_passed` and `gates_failed` on each recommendation. A scored skip is a row on `skipped` with `failed_gate`. The research queue is unchanged: no beliefs is not a decision tree.
+
+### Catalog size
+
+`KALSHI_SAFE_MODE=1` advertises 8 tools: `exchange_status`, `list_markets`, `find_best_bets`, `append_decision`, `summarize_decisions`, `cash_or_positions`, `fe_routine`, `list_open_orders`.
+
+`KALSHI_SAFE_MODE=0` adds `place_order`, `cancel_order`, `amend_order`, and `decrease_order` (12 tools). Mutations stay behind safe mode, the same as before. Fleet hosts stay at 8. The Finance Engineer host is the one that carries 12. A host that caps a server near 10 tools should keep safe mode on everywhere except that host.
 
 ## Trade
 
@@ -236,7 +256,7 @@ The Finance Engineer harness is the only unlock. After that host sets `KALSHI_SA
 
 `time_in_force` is `fill_or_kill`, `good_till_canceled`, or `immediate_or_cancel`. The maker path is `time_in_force=good_till_canceled` and `post_only=true`. `post_only` with `fill_or_kill` or `immediate_or_cancel` is refused here. Kalshi also rejects a `post_only` order that would cross, so a maker flag cannot silently take. `self_trade_prevention_type` is `taker_at_cross` or `maker`. `expiration_time` is only valid with `good_till_canceled`. `reduce_only` is only valid with `immediate_or_cancel` and does not require `corr_group`. Pass `client_order_id` yourself when you want dedup. This server does not invent one.
 
-A successful `place_order` echoes `role` (`maker` when `post_only` is true, otherwise `taker`), `fee_cents_est` from the series catalog on the ticker (unlisted maker M is 0; NFL, Fed, and CPI maker M is 1), and `day_spend_remaining` from the live book against the soft $10 UTC-day cap. `fe_routine` does not invent that remaining figure. Size above $2 still needs a profitable fill history. There is no withdraw and no deposit.
+A successful `place_order` echoes `role` (`maker` when `post_only` is true, otherwise `taker`), `fee_cents_est` from the series catalog on the ticker (unlisted maker M is 0; NFL, Fed, and CPI maker M is 1), `flb_band` for the entry price (`price` on a bid, `1 - price` on an ask), `edge_net_cents` when the caller passes it (the server does not invent one), `corr_group`, `order_id`, and `day_spend_remaining` from the live book against the soft $10 UTC-day cap. `fe_routine` does not invent that remaining figure. Size above $2 still needs a profitable Kalshi fill history. If the ack already shows a fill, one `fill` line is appended to the decision ledger for that audit. The line does not raise the $2 cap. There is no withdraw and no deposit.
 
 Optional place fields: `client_order_id`, `expiration_time`, `post_only`, `reduce_only`, `cancel_order_on_pause`, `subaccount`, `order_group_id`, `exchange_index`.
 

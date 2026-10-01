@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import re
 import urllib.parse
-
-from decimal import Decimal
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 from kalshi_readonly.caps import enforce_open, load_caps, note_open, opening_notional, summarize_book
 from kalshi_readonly.guard import require_mutation
 from kalshi_readonly.http import auth_call, auth_get
-from kalshi_readonly.score import fee_dome_cents, maker_fee_cents, series_fees
+from kalshi_readonly.ledger import MIRROR_LEDGER, record_fill
+from kalshi_readonly.score import fee_dome_cents, flb_band, maker_fee_cents, series_fees
 
 _COUNT_RE = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d{1,2})?$")
 _PRICE_RE = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d{1,4})?$")
@@ -189,15 +191,73 @@ def _guard_open(
     return book, notional
 
 
+def _optional_edge(args: dict) -> str | None:
+    if "edge_net_cents" not in args or args["edge_net_cents"] is None:
+        return None
+    value = args["edge_net_cents"]
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise RuntimeError("edge_net_cents must be a number")
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise RuntimeError("edge_net_cents must be a number") from None
+    if amount < Decimal("-100") or amount > Decimal("100"):
+        raise RuntimeError("edge_net_cents must be between -100 and 100")
+    return format(amount, "f")
+
+
+def _decision_id(args: dict) -> str | None:
+    if "decision_id" not in args or args["decision_id"] in (None, ""):
+        return None
+    value = args["decision_id"]
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,180}", value):
+        raise RuntimeError("decision_id must be a decision id")
+    return value
+
+
+def _response_order_id(result: dict) -> str | None:
+    sources = [result]
+    order = result.get("order")
+    if isinstance(order, dict):
+        sources.append(order)
+    for source in sources:
+        for key in ("order_id", "id"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _response_fill_count(result: dict) -> Decimal:
+    sources = [result]
+    order = result.get("order")
+    if isinstance(order, dict):
+        sources.append(order)
+    for source in sources:
+        for key in ("fill_count_fp", "fill_count"):
+            raw = source.get(key)
+            if raw in (None, ""):
+                continue
+            try:
+                return Decimal(str(raw))
+            except (InvalidOperation, ValueError):
+                return Decimal(0)
+    return Decimal(0)
+
+
 def _execution_echo(
     result: dict,
     *,
     ticker: str,
+    side: str,
     price: str,
     count: str,
     post_only: bool | None,
     book: dict | None,
     notional: Decimal,
+    corr_group: str | None,
+    edge_net_cents: str | None,
+    decision_id: str | None = None,
 ) -> dict:
     """Fee and role for the proof log. day_spend_remaining comes from the book just loaded."""
     out = dict(result)
@@ -230,7 +290,60 @@ def _execution_echo(
         if remaining < 0:
             remaining = Decimal("0.00")
         out["day_spend_remaining"] = format(remaining, "f")
+    entry = Decimal(price) if side == "bid" else Decimal(1) - Decimal(price)
+    out["flb_band"] = flb_band(entry)
+    out["edge_net_cents"] = edge_net_cents
+    out["corr_group"] = corr_group
+    order_id = _response_order_id(result)
+    out["order_id"] = order_id
+    filled = _response_fill_count(result)
+    if filled > 0 and isinstance(order_id, str):
+        out["ledger_fill"] = _append_fill_ack(
+            ticker=ticker,
+            side="yes" if side == "bid" else "no",
+            price=price,
+            count=format(filled, "f"),
+            order_id=order_id,
+            corr_group=corr_group,
+            edge_net_cents=edge_net_cents,
+            fee_cents_est=out.get("fee_cents_est"),
+            flb_band=out["flb_band"],
+            decision_id=decision_id,
+        )
     return out
+
+
+def _append_fill_ack(**fields: object) -> dict:
+    """Audit line for the >$2 history gate. The gate still reads Kalshi fills."""
+    moment = datetime.now(ZoneInfo("America/Los_Angeles"))
+    stamp = moment.strftime("%Y%m%d-%H%M%S")
+    side = str(fields["side"])
+    ticker = str(fields["ticker"])
+    record = {
+        "id": f"{stamp}-{ticker}-{side}-fill",
+        "as_of": moment.isoformat(timespec="seconds"),
+        "action": "fill",
+        "ticker": ticker,
+        "side": side,
+        "order_id": fields["order_id"],
+        "parent_id": fields.get("decision_id"),
+        "price": fields["price"],
+        "count": fields["count"],
+        "fee_cents_est": fields.get("fee_cents_est"),
+        "flb_band": fields.get("flb_band"),
+        "edge_net_cents": fields.get("edge_net_cents"),
+        "corr_group": fields.get("corr_group"),
+        "notes": "place_order ack. Audit only. The $2 history gate still reads Kalshi fills.",
+    }
+    record = {key: value for key, value in record.items() if value is not None}
+    try:
+        written = record_fill(record)
+    except RuntimeError as exc:
+        text = str(exc)
+        if "PRIVATE KEY" in text or "-----BEGIN" in text:
+            text = "ledger append failed"
+        return {"error": text, "mirror_path": MIRROR_LEDGER}
+    return {"id": written["id"], "path": written["path"], "mirror_path": written["mirror_path"]}
 
 
 def list_open_orders(args: dict | None = None) -> dict:
@@ -297,6 +410,8 @@ def place_order(args: dict | None = None) -> dict:
     corr_group = _optional_group(args)
     if reduce_only is not True and corr_group is None:
         raise RuntimeError("corr_group is required on opening risk")
+    edge_net_cents = _optional_edge(args)
+    decision_id = _decision_id(args)
     book, notional = _guard_open(
         ticker=ticker,
         side=side,
@@ -314,11 +429,15 @@ def place_order(args: dict | None = None) -> dict:
     return _execution_echo(
         result,
         ticker=ticker,
+        side=side,
         price=price,
         count=count,
         post_only=post_only,
         book=book,
         notional=notional,
+        corr_group=corr_group,
+        edge_net_cents=edge_net_cents,
+        decision_id=decision_id,
     )
 
 
@@ -370,11 +489,15 @@ def amend_order(args: dict | None = None) -> dict:
     return _execution_echo(
         result,
         ticker=str(body["ticker"]),
+        side=str(body["side"]),
         price=str(body["price"]),
         count=str(body["count"]),
         post_only=None,
         book=book,
         notional=notional,
+        corr_group=corr_group,
+        edge_net_cents=_optional_edge(args),
+        decision_id=_decision_id(args),
     )
 
 
@@ -442,7 +565,10 @@ MUTATING_TOOLS = [
             "self_trade_prevention_type is taker_at_cross or maker. "
             "Pass client_order_id yourself if you need dedup. "
             "A successful place echoes role (maker or taker), fee_cents_est from the series catalog on the ticker, "
+            "flb_band for the entry price, edge_net_cents when the caller passes it, corr_group, order_id, "
             "and day_spend_remaining from the live book. "
+            "A response that already shows a fill appends one fill line to the decision ledger. "
+            "That line is an audit trail. It does not raise the $2 history gate. The gate still reads Kalshi fills. "
             + _MUTATION_NOTE
         ),
         "inputSchema": {
@@ -474,6 +600,14 @@ MUTATING_TOOLS = [
                         "Examples: nfl_week_N, city_weather_YYYYMMDD, fed_meeting_YYYYMM. "
                         "Shares a 30% sleeve cap. A full co-resolution matrix is later."
                     ),
+                },
+                "edge_net_cents": {
+                    "type": "number",
+                    "description": "Echoed onto the response for the ledger. Omitted from the Kalshi body. Not computed here.",
+                },
+                "decision_id": {
+                    "type": "string",
+                    "description": "Optional parent id. Stored on the fill line when the ack shows a fill.",
                 },
                 "confirm": _CONFIRM,
             },

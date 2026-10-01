@@ -52,6 +52,7 @@ def _envelope(
     pages: int,
     requests: int,
     rate_limited: bool = False,
+    skipped: list[dict] | None = None,
 ) -> dict:
     return {
         "places_orders": False,
@@ -65,6 +66,7 @@ def _envelope(
         "scanned": counts.get("scanned", 0),
         "filters": filters_payload(options),
         "recommendations": [_drop_empty(row) for row in recommendations],
+        "skipped": [_drop_empty(row) for row in (skipped or [])],
         "research_queue": [_drop_empty(row) for row in research],
         "missing": missing,
         "counts": counts,
@@ -87,7 +89,7 @@ def find_best_bets(args: dict | None = None, *, now: datetime | None = None) -> 
     if beliefs:
         tickers = sorted({item["ticker"] for item in beliefs})
         loaded = load_markets(tickers=tickers, max_pages=1, page_size=200, scan=False)
-        ranked, counts, missing = rank_markets(loaded.markets, beliefs, options, moment)
+        ranked, counts, missing, skipped = rank_markets(loaded.markets, beliefs, options, moment)
         research: list[dict] = []
         source = "beliefs"
     else:
@@ -100,6 +102,7 @@ def find_best_bets(args: dict | None = None, *, now: datetime | None = None) -> 
         research, counts = research_queue(loaded.markets, options, moment)
         ranked = []
         missing = []
+        skipped = []
         source = "scan"
     return _envelope(
         recommendations=ranked,
@@ -112,6 +115,7 @@ def find_best_bets(args: dict | None = None, *, now: datetime | None = None) -> 
         pages=loaded.pages,
         requests=loaded.requests,
         rate_limited=loaded.rate_limited,
+        skipped=skipped,
     )
 
 
@@ -129,12 +133,13 @@ def recommend_from_records(payload: dict) -> dict:
     options = parse_options(args)
     beliefs = parse_beliefs(args.get("beliefs"))
     if beliefs:
-        ranked, counts, missing = rank_markets(markets, beliefs, options, moment)
+        ranked, counts, missing, skipped = rank_markets(markets, beliefs, options, moment)
         research: list[dict] = []
     else:
         research, counts = research_queue(markets, options, moment)
         ranked = []
         missing = []
+        skipped = []
     return _envelope(
         recommendations=ranked,
         research=research,
@@ -145,6 +150,7 @@ def recommend_from_records(payload: dict) -> dict:
         cache="fixture",
         pages=0,
         requests=0,
+        skipped=skipped,
     )
 
 
@@ -187,6 +193,9 @@ FIND_BEST_TOOL = {
         "max_price defaults to 0.84, the hard ceiling, so a 50 to 84 cent contract with edge stays eligible. "
         "Pass a lower max_price to narrow the band. "
         "Lifetime volume of at least 1000 passes the floor. 24h min_volume is the weaker proxy. Both are on the row. "
+        "Each recommendation and each scored skip row includes gates_passed and gates_failed. "
+        "A passing row has an empty gates_failed. "
+        "Scored skips are returned on skipped, separate from the aggregate counts. "
         "A recommendation with edge_net_cents at or below 0 is dropped. "
         "A taker quote under 10 cents is dropped unless allow_longshot is true, edge_net_cents is at least 8, and stake is $2. "
         "A 10 to 25 cent quote is stake_mode fixed_2 and suggested risk is capped at $2. "
