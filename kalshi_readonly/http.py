@@ -3,10 +3,10 @@
 GET, POST, and DELETE all use the same RSA-PSS headers. The body is not part of
 the signature. Other methods are refused.
 
-429 and 503 retry with Retry-After when Kalshi sends one (capped), otherwise a
-short exponential backoff with jitter. The retry budget is small so a scan
-does not spend the shared IP quota. After the budget is spent the error is
-rate_limited.
+429 and 503 retry with Retry-After when Kalshi sends one (honored up to 30s),
+otherwise a short exponential backoff with jitter. Those statuses get at most
+5 attempts so a scan stays finite under shared IP pressure. After the budget
+is spent the error is rate_limited.
 """
 
 from __future__ import annotations
@@ -26,9 +26,9 @@ from kalshi_readonly.auth import USER_AGENT, api_base, signed_headers
 _TIMEOUT = 20
 _ALLOWED = frozenset({"GET", "POST", "DELETE"})
 _RETRY_STATUSES = frozenset({429, 503})
-_MAX_ATTEMPTS = 3
+_MAX_ATTEMPTS = 5
 _BASE_DELAY = 0.25
-_MAX_DELAY = 3.0
+_MAX_DELAY = 30.0
 
 
 class RateLimitedError(RuntimeError):

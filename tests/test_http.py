@@ -77,7 +77,7 @@ def test_429_without_retry_after_uses_exponential_backoff_then_rate_limited(
         public_get("/markets")
     assert calls["n"] == _MAX_ATTEMPTS
     assert len(sleeps) == _MAX_ATTEMPTS - 1
-    assert sleeps == [0.25, 0.5]
+    assert sleeps == [0.25, 0.5, 1.0, 2.0]
     assert "PRIVATE KEY" not in str(caught.value)
 
 
@@ -87,12 +87,32 @@ def test_503_retries_and_retry_after_is_capped(monkeypatch: pytest.MonkeyPatch, 
     def fake_open(req: urllib.request.Request, timeout: float = 20):
         calls["n"] += 1
         if calls["n"] < _MAX_ATTEMPTS:
-            raise _http_error(req, 503, **{"Retry-After": "30"})
+            raise _http_error(req, 503, **{"Retry-After": "45"})
         return _Body({"exchange_active": True})
 
     monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
     assert public_get("/exchange/status") == {"exchange_active": True}
-    assert sleeps == [_MAX_DELAY, _MAX_DELAY]
+    assert sleeps == [_MAX_DELAY] * (_MAX_ATTEMPTS - 1)
+
+
+def test_429_retry_after_five_seconds_is_not_clipped_to_three(
+    monkeypatch: pytest.MonkeyPatch, sleeps: list[float]
+) -> None:
+    assert _MAX_DELAY == 30.0
+    assert _MAX_ATTEMPTS == 5
+    calls = {"n": 0}
+
+    def fake_open(req: urllib.request.Request, timeout: float = 20):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _http_error(req, 429, b'{"message":"slow down"}', **{"Retry-After": "5"})
+        return _Body({"markets": []})
+
+    monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
+    assert public_get("/markets", {"limit": 1}) == {"markets": []}
+    assert calls["n"] == 2
+    assert sleeps == [5.0]
+    assert sleeps[0] > 3.0
 
 
 def test_retry_after_http_date_is_honored(monkeypatch: pytest.MonkeyPatch, sleeps: list[float]) -> None:
