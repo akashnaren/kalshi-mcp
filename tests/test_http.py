@@ -12,7 +12,16 @@ from email.utils import formatdate
 
 import pytest
 
-from kalshi_readonly.http import RateLimitedError, _DETAIL_CAP, _MAX_ATTEMPTS, _MAX_DELAY, _detail, public_get
+from kalshi_readonly.http import (
+    RateLimitedError,
+    _DETAIL_CAP,
+    _MAX_ATTEMPTS,
+    _MAX_DELAY,
+    _RATE_BASE_DELAY,
+    _delay,
+    _detail,
+    public_get,
+)
 
 
 class _Body:
@@ -45,6 +54,7 @@ def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     waited: list[float] = []
     monkeypatch.setattr("kalshi_readonly.http._sleep", lambda seconds: waited.append(seconds))
     monkeypatch.setattr("kalshi_readonly.http._jitter", lambda: 0.0)
+    monkeypatch.setattr("kalshi_readonly.http.wait_markets_slot", lambda: None)
     return waited
 
 
@@ -77,7 +87,8 @@ def test_429_without_retry_after_uses_exponential_backoff_then_rate_limited(
         public_get("/markets")
     assert calls["n"] == _MAX_ATTEMPTS
     assert len(sleeps) == _MAX_ATTEMPTS - 1
-    assert sleeps == [0.25, 0.5, 1.0, 2.0]
+    assert sleeps[0] >= 2.0
+    assert sleeps == [2.0, 4.0, 8.0, 16.0]
     assert "PRIVATE KEY" not in str(caught.value)
 
 
@@ -143,7 +154,17 @@ def test_garbage_retry_after_falls_back_to_backoff(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
     assert public_get("/markets") == {"ok": True}
-    assert sleeps == [0.25]
+    assert sleeps[0] >= 2.0
+    assert sleeps == [2.0]
+
+
+def test_missing_retry_after_schedule_is_two_four_eight_sixteen_thirty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("kalshi_readonly.http._jitter", lambda: 0.0)
+    assert _RATE_BASE_DELAY == 2.0
+    assert _MAX_DELAY == 30.0
+    assert [_delay(attempt, None) for attempt in range(1, 6)] == [2.0, 4.0, 8.0, 16.0, 30.0]
 
 
 _WA_CODE = (

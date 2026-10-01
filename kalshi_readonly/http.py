@@ -3,10 +3,14 @@
 GET, POST, and DELETE all use the same RSA-PSS headers. The body is not part of
 the signature. Other methods are refused.
 
-429 and 503 retry with Retry-After when Kalshi sends one (honored up to 30s),
-otherwise a short exponential backoff with jitter. Those statuses get at most
-5 attempts so a scan stays finite under shared IP pressure. After the budget
-is spent the error is rate_limited.
+429 and 503 retry with Retry-After when Kalshi sends one (honored up to 30s).
+When that header is missing or not a usable delay, the waits are 2s, 4s, 8s,
+then 16s, plus up to 0.25s of jitter. The next step of that schedule is capped
+at 30s. That is not the 0.25/0.5/1/2 schedule. Those statuses get at most 5
+attempts. After the budget is spent the error is rate_limited.
+
+public_get takes a shared file lock before any path containing /markets so
+processes on one machine start those GETs at least 1.5s apart.
 """
 
 from __future__ import annotations
@@ -22,12 +26,14 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 from kalshi_readonly.auth import USER_AGENT, api_base, signed_headers
+from kalshi_readonly.throttle import wait_markets_slot
 
 _TIMEOUT = 20
 _ALLOWED = frozenset({"GET", "POST", "DELETE"})
 _RETRY_STATUSES = frozenset({429, 503})
 _MAX_ATTEMPTS = 5
 _BASE_DELAY = 0.25
+_RATE_BASE_DELAY = 2.0
 _MAX_DELAY = 30.0
 
 
@@ -52,6 +58,7 @@ def _sleep(seconds: float) -> None:
 
 
 def _jitter() -> float:
+    """Small extra wait. The rate-limit base itself is _RATE_BASE_DELAY."""
     return random.uniform(0, _BASE_DELAY)
 
 
@@ -120,10 +127,11 @@ def _retry_after_seconds(header: str | None) -> float | None:
 
 
 def _delay(attempt: int, retry_after: str | None) -> float:
+    """Honor Retry-After. Otherwise 2, 4, 8, 16, then 30 (plus jitter)."""
     parsed = _retry_after_seconds(retry_after)
     if parsed is not None:
         return min(_MAX_DELAY, parsed)
-    base = min(_MAX_DELAY, _BASE_DELAY * (2 ** (attempt - 1)))
+    base = min(_MAX_DELAY, _RATE_BASE_DELAY * (2 ** (attempt - 1)))
     return min(_MAX_DELAY, base + _jitter())
 
 
@@ -176,7 +184,16 @@ def _exchange(method: str, path: str, build: Callable[[], urllib.request.Request
     raise RateLimitedError(_message(verb, path, last_code, last_detail, rate=True))
 
 
+def _needs_markets_slot(path: str) -> bool:
+    rel = path.split("?", 1)[0]
+    if not rel.startswith("/"):
+        rel = f"/{rel}"
+    return "/markets" in rel
+
+
 def public_get(path: str, query: dict | None = None) -> dict:
+    if _needs_markets_slot(path):
+        wait_markets_slot()
     sign_path = signed_path(path)
 
     def build() -> urllib.request.Request:
