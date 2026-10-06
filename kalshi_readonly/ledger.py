@@ -28,10 +28,12 @@ MIRROR_LEDGER = f"{MIRROR_DIR}/decisions.jsonl"
 _ACTIONS = frozenset({"place", "skip", "cancel", "exit", "amend", "outcome", "fill"})
 _SIDES = frozenset({"yes", "no"})
 _CATEGORIES = frozenset({"sports", "weather", "politics", "crypto", "macro", "other"})
-_RANK = frozenset({"find_best_bets", "fe_manual"})
+RANK_SOURCES = ("find_best_bets", "fe_manual")
+_RANK = frozenset(RANK_SOURCES)
 _RESULTS = frozenset({"win", "loss", "void", "partial"})
 _EXITS = frozenset({"settlement", "EXIT_EDGE_GONE", "TAKE_PROFIT_MID", "manual"})
-_FLB = frozenset({"<10¢", "10–25¢", "25–75¢", "75–90¢", "≥90¢", ">=90¢"})
+FLB_BANDS = ("<10¢", "10–25¢", "25–75¢", "75–90¢", "≥90¢", ">=90¢")
+_FLB = frozenset(FLB_BANDS)
 _FLB_CANON = {">=90¢": "≥90¢"}
 
 _ID_RE = re.compile(r"^\d{8}-\d{4,6}-.+$")
@@ -128,6 +130,10 @@ def _optional_number(record: dict, field: str, *, low: Decimal | None = None, hi
     return _number(record[field], field, low=low, high=high)
 
 
+def _allowed(field: str, allowed: tuple[str, ...]) -> str:
+    return f"{field} must be one of the allowed values: {', '.join(allowed)}"
+
+
 def _string_list(value: object, field: str) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
         raise RuntimeError(f"{field} must be a list of strings")
@@ -222,7 +228,7 @@ def _validate_decision(row: dict) -> None:
     _optional_number(row, "edge_net_cents", low=Decimal("-100"), high=Decimal("100"))
     _optional_number(row, "fee_cents_est", low=Decimal(0), high=Decimal("10000"))
     if "flb_band" in row and row["flb_band"] is not None and row["flb_band"] not in _FLB:
-        raise RuntimeError("flb_band is not a known band")
+        raise RuntimeError(_allowed("flb_band", FLB_BANDS))
     _optional_number(row, "days_to_res", low=Decimal(0), high=Decimal("3650"))
     if "maker_flag" in row and row["maker_flag"] is not None and not isinstance(row["maker_flag"], bool):
         raise RuntimeError("maker_flag must be a boolean")
@@ -252,7 +258,7 @@ def _validate_decision(row: dict) -> None:
     if not isinstance(path, list) or not path or not all(isinstance(item, str) and item.strip() for item in path):
         raise RuntimeError("logic_path must be a non-empty list of gate ids")
     if row.get("rank_source") not in _RANK:
-        raise RuntimeError("rank_source must be find_best_bets or fe_manual")
+        raise RuntimeError(_allowed("rank_source", RANK_SOURCES))
     if "order_id" in row and row["order_id"] is not None:
         _string(row["order_id"], "order_id", max_len=128)
     if "confirm" in row and not isinstance(row["confirm"], bool):
@@ -608,14 +614,32 @@ APPEND_DECISION_TOOL = {
         "Finance Engineer mirrors that file to /workspace/state/kalshi/ledger/decisions.jsonl. "
         "place and skip need id, as_of (ISO with timezone, Pacific Time expected), ticker, side, "
         "corr_group, category, belief_conf, model_sources, evidence_summary, gates_passed, gates_failed, "
-        "failed_gate, logic_path, and rank_source. A place also needs confirm true, stake_dollars, count, and price."
+        "failed_gate, logic_path, and rank_source. A place also needs confirm true, stake_dollars, count, and price. "
+        "flb_band (price band) allowed values: <10¢, 10–25¢, 25–75¢, 75–90¢, ≥90¢ (>=90¢ accepted). "
+        "rank_source allowed values: find_best_bets, fe_manual."
     ),
     "inputSchema": {
         "type": "object",
         "properties": {
             "record": {
                 "type": "object",
-                "description": "One decision, outcome, or fill object. Appended as one JSON line after validation.",
+                "description": (
+                    "One decision, outcome, or fill object. Appended as one JSON line after validation. "
+                    "flb_band allowed values: <10¢, 10–25¢, 25–75¢, 75–90¢, ≥90¢ (>=90¢ accepted). "
+                    "rank_source allowed values: find_best_bets, fe_manual."
+                ),
+                "properties": {
+                    "flb_band": {
+                        "type": "string",
+                        "enum": list(FLB_BANDS),
+                        "description": "Price band. Allowed: <10¢, 10–25¢, 25–75¢, 75–90¢, ≥90¢. >=90¢ is accepted.",
+                    },
+                    "rank_source": {
+                        "type": "string",
+                        "enum": list(RANK_SOURCES),
+                        "description": "Rank source. Allowed: find_best_bets, fe_manual.",
+                    },
+                },
             },
         },
         "required": ["record"],

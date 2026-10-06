@@ -15,6 +15,9 @@ kalshi-readonly = "kalshi_readonly.tools:main"
 [tool.setuptools.packages.find]
 include = ["kalshi_readonly*"]
 
+[tool.setuptools.package-data]
+kalshi_readonly = ["washington_attestation.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
