@@ -58,7 +58,7 @@ python3 -c 'import json; from kalshi_readonly.tools import cash_or_positions; pr
 
 ## Install as a Cursor plugin
 
-Cursor hosts read `.cursor-plugin/plugin.json` (`kalshi-readonly`, version `0.3.0`). Root `plugin.json` and `mcp.json` stay in place. Skills are under `skills/`. The Finance Engineer checklist is `harness/SKILL.md`. Stdio launch for the Cursor plugin is root `mcp.json`: command `python3`, args `${PLUGIN_ROOT}/server.py`, env `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH`, `KALSHI_PRIVATE_KEY_PEM`, and `KALSHI_SAFE_MODE` (default on). No secrets are committed.
+Cursor hosts read `.cursor-plugin/plugin.json` (`kalshi-readonly`, version `0.3.0`). Root `plugin.json` and `mcp.json` stay in place. Skills are under `skills/`. The Finance Engineer checklist is `harness/SKILL.md`. Stdio launch for the Cursor plugin is root `mcp.json`: command `python3`, args `${PLUGIN_ROOT}/server.py`, env `KALSHI_API_KEY_ID`, `KALSHI_API_KEY_ID_PATH`, `KALSHI_PRIVATE_KEY_PATH`, `KALSHI_PRIVATE_KEY_PEM`, and `KALSHI_SAFE_MODE` (default on). The key id may come from `KALSHI_API_KEY_ID_PATH` or `~/.secrets/kalshi/key_id` when unset. No secrets are committed.
 
 This repository is not published to the Cursor Marketplace or cursor.directory. Publishing is out of scope. Until then, use the IDE `mcp.json` entry below, or the Grok Bot command in the next section.
 
