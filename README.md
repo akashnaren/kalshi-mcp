@@ -154,9 +154,9 @@ The Finance Engineer sleeve sets `KALSHI_SAFE_MODE=0` and restarts the host. `pl
 
 | Tool | What it does |
 | --- | --- |
-| `exchange_status` | Public exchange status |
-| `list_markets` | Public markets for liquid singles. Default `limit` 25, `status=open`, `mve_filter=exclude`, `liquid=true` (drop null yes bid and yes ask). Follows an empty page up to 4 times. Optional `cursor`, `series_ticker`, `event_ticker`, `ticker`. `category` is a client prefix filter (sports, weather, politics, crypto, macro, other), not a Kalshi parameter. `mve_filter=all` and `liquid=false` and `status=any` widen the page |
-| `append_decision` | Validate one place, skip, or outcome and append it to the JSONL ledger. Does not trade. Does not rewrite history |
+| `exchange_status` | Public exchange status, plus Washington region attestation (`expires_at`, `expires_in_hours`, `expired`) from the note on disk. `washington_attestation` is null with a reason when that note is missing |
+| `list_markets` | Public markets for liquid singles. Default `limit` 25, `status=open`, `mve_filter=exclude`, `liquid=true` (drop null yes bid and yes ask). Follows an empty page up to 4 times. Optional `cursor`, `series_ticker`, `event_ticker`. `ticker` is one market via `GET /markets/{ticker}` and includes `result` plus settlement fields Kalshi sent. List rows include those fields when present. `category` is a client prefix filter (sports, weather, politics, crypto, macro, other), not a Kalshi parameter. `mve_filter=all` and `liquid=false` and `status=any` widen the page |
+| `append_decision` | Validate one place, skip, or outcome and append it to the JSONL ledger. Does not trade. Does not rewrite history. `flb_band` allowed values: `<10¢`, `10–25¢`, `25–75¢`, `75–90¢`, `≥90¢` (`>=90¢` accepted). `rank_source` allowed values: `find_best_bets`, `fe_manual` |
 | `summarize_decisions` | Week and life-to-date stats from that ledger only. Does not invent N |
 | `find_best_bets` | Read-only rank. See Bets. Does not place orders. Rows include `edge_net_cents`, `flb_band`, `kelly_frac`, `stake_mode`, `side_exec`, `days_to_res`, `spread_cents`, `depth_at_ask`, `fee_cents_est`, `corr_group_hint`, and `hold_to_res_default`. `rate_limited` is true when a later scan page hit the retry budget |
 | `fe_routine` | Daily and end-of-day prompt for the Finance Engineer. Does not trade |

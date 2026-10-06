@@ -7,7 +7,10 @@ There is no withdraw, deposit, or strategy tool.
 
 from __future__ import annotations
 
+import urllib.parse
+
 from kalshi_readonly import __version__
+from kalshi_readonly.attestation import load_washington_attestation
 from kalshi_readonly.guard import safe_mode_enabled
 from kalshi_readonly.http import auth_get, public_get
 from kalshi_readonly.report import present_balance, present_fills, present_positions
@@ -53,7 +56,13 @@ def _limit(args: dict, default: int) -> int:
 
 
 def exchange_status(_args: dict | None = None) -> dict:
-    return public_get("/exchange/status")
+    """Public exchange status plus the Washington attestation note, when one is stored."""
+    payload = public_get("/exchange/status")
+    if not isinstance(payload, dict):
+        raise RuntimeError("unexpected exchange status payload")
+    out = dict(payload)
+    out.update(load_washington_attestation())
+    return out
 
 
 def _optional_text(args: dict, field: str, limit: int) -> str | None:
@@ -100,11 +109,20 @@ def _category_match(market: dict, category: str) -> bool:
     return False
 
 
+_SETTLEMENT_FIELDS = (
+    "settlement_value",
+    "settlement_value_dollars",
+    "settlement_ts",
+    "expiration_value",
+)
+
+
 def _compact_market(market: dict) -> dict:
-    return {
+    row = {
         "ticker": market.get("ticker"),
         "title": market.get("title"),
         "status": market.get("status"),
+        "result": market.get("result"),
         "yes_bid": market.get("yes_bid"),
         "yes_ask": market.get("yes_ask"),
         "yes_bid_dollars": market.get("yes_bid_dollars"),
@@ -117,6 +135,10 @@ def _compact_market(market: dict) -> dict:
         "series_ticker": market.get("series_ticker"),
         "event_ticker": market.get("event_ticker"),
     }
+    for key in _SETTLEMENT_FIELDS:
+        if key in market:
+            row[key] = market.get(key)
+    return row
 
 
 def list_markets(args: dict | None = None) -> dict:
@@ -127,6 +149,8 @@ def list_markets(args: dict | None = None) -> dict:
     bid and yes ask are both missing. A page that is entirely empty is followed,
     up to a few pages, so a short list can still return a liquid single.
     category is a client prefix filter. It is not a Kalshi query parameter.
+    ticker is one market: GET /markets/{ticker}. That row is returned even when
+    the book is empty, so a settlement job can read result.
     """
     args = args or {}
     limit = _limit(args, 25)
@@ -149,6 +173,28 @@ def list_markets(args: dict | None = None) -> dict:
         if category not in _CATEGORY_PREFIXES:
             raise RuntimeError("category must be sports, weather, politics, crypto, macro, or other")
     cursor = _optional_text(args, "cursor", 1024)
+    ticker = _optional_text(args, "ticker", 128)
+    filters = {
+        "status": status,
+        "mve_filter": mve,
+        "liquid": liquid,
+        "category": category,
+        "ticker": ticker,
+    }
+    if ticker is not None:
+        data = public_get("/markets/" + urllib.parse.quote(ticker, safe=""))
+        market = data.get("market") if isinstance(data, dict) else None
+        if not isinstance(market, dict):
+            raise RuntimeError("unexpected market payload")
+        return {
+            "count": 1,
+            "markets": [_compact_market(market)],
+            "cursor": "",
+            "pages_fetched": 1,
+            "dropped_null_book": 0,
+            "dropped_mve": 0,
+            "filters": filters,
+        }
     kept: list[dict] = []
     dropped_null = 0
     dropped_mve = 0
@@ -160,9 +206,6 @@ def list_markets(args: dict | None = None) -> dict:
             query["status"] = status
         if mve != "all":
             query["mve_filter"] = mve
-        ticker = _optional_text(args, "ticker", 128)
-        if ticker is not None:
-            query["ticker"] = ticker
         series = _optional_text(args, "series_ticker", 128)
         if series is not None:
             query["series_ticker"] = series
@@ -204,12 +247,7 @@ def list_markets(args: dict | None = None) -> dict:
         "pages_fetched": pages,
         "dropped_null_book": dropped_null,
         "dropped_mve": dropped_mve,
-        "filters": {
-            "status": status,
-            "mve_filter": mve,
-            "liquid": liquid,
-            "category": category,
-        },
+        "filters": filters,
     }
 
 
@@ -232,7 +270,13 @@ def cash_or_positions(args: dict | None = None) -> dict:
 READ_TOOLS = [
     {
         "name": "exchange_status",
-        "description": "Public Kalshi exchange status.",
+        "description": (
+            "Public Kalshi exchange status. "
+            "Also reports the Washington region attestation from the note on disk: "
+            "expires_at, expires_in_hours, and expired. "
+            "washington_attestation is null and washington_attestation_reason explains why "
+            "when that note is missing or has no expires_at. Does not invent an expiry."
+        ),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -244,6 +288,10 @@ READ_TOOLS = [
             "A page that is only multivariate combos or null books is followed, up to 4 pages. "
             "cursor is the Kalshi cursor after the last page read. "
             "Optional series_ticker and event_ticker are sent to GET /markets. "
+            "ticker is one market and is fetched with GET /markets/{ticker} (Kalshi's single-market read; "
+            "the list filter name is tickers). That row includes result and any settlement fields Kalshi sent "
+            "(settlement_value, settlement_value_dollars, settlement_ts, expiration_value), including a settled market with a null book. "
+            "List rows include result and those settlement fields when Kalshi sent them. "
             "category is sports, weather, politics, crypto, macro, or other and is applied here, not by Kalshi. "
             "Pass mve_filter all to include multivariate markets. Pass liquid false to keep null books. "
             "Pass status any to omit the status filter."
@@ -256,7 +304,10 @@ READ_TOOLS = [
                     "type": "string",
                     "description": "open (default), unopened, paused, closed, settled, or any.",
                 },
-                "ticker": {"type": "string"},
+                "ticker": {
+                    "type": "string",
+                    "description": "One market ticker. Fetched with GET /markets/{ticker}, including settled results.",
+                },
                 "cursor": {"type": "string"},
                 "series_ticker": {"type": "string"},
                 "event_ticker": {"type": "string"},
