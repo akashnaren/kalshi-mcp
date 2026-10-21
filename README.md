@@ -68,7 +68,7 @@ scripts/refresh-host.sh --dry-run --dest /home/box/mcp/kalshi-mcp-main 1ce6d72
 scripts/refresh-host.sh --dest /home/box/mcp/kalshi-mcp-main 1ce6d72
 ```
 
-A second run of the same commit prints `already installed` and does not rebuild. `--dry-run` resolves the commit and writes nothing. `--dest` must be an absolute path outside this checkout.
+A second run of the same commit prints `already installed` and does not rebuild. `--dry-run` resolves the commit and writes nothing. `--dest` must be an absolute path outside this checkout. An existing dest must be empty or already this install. The script refuses any other directory.
 
 ## Install as a Cursor plugin
 

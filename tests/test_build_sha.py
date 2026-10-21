@@ -7,7 +7,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
+_CHECKOUT = (ROOT / ".git").exists()
 _STAMP = "1ce6d72abcde0123456789abcdef0123456789ab"
 _OTHER = "ffffffffffffffffffffffffffffffffffffffff"
 _CHILD = """
@@ -124,6 +127,7 @@ def test_refresh_help_includes_examples() -> None:
     assert "scripts/refresh-host.sh --dry-run --dest /home/box/mcp/kalshi-mcp-main 1ce6d72" in proc.stdout
 
 
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
 def test_refresh_dry_run_writes_nothing(tmp_path: Path) -> None:
     dest = tmp_path / "host"
     proc = _refresh("--dry-run", "--dest", str(dest), _git_sha())
@@ -137,6 +141,7 @@ def test_refresh_dry_run_writes_nothing(tmp_path: Path) -> None:
     assert not dest.exists()
 
 
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
 def test_refresh_refuses_bad_usage(tmp_path: Path) -> None:
     sha = _git_sha()
     missing = _refresh("--dest", str(tmp_path / "host"))
@@ -150,6 +155,7 @@ def test_refresh_refuses_bad_usage(tmp_path: Path) -> None:
     assert branch.returncode == 2
 
 
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
 def test_refresh_already_installed_is_a_noop(tmp_path: Path) -> None:
     dest = tmp_path / "host"
     dest.mkdir()
@@ -163,3 +169,63 @@ def test_refresh_already_installed_is_a_noop(tmp_path: Path) -> None:
     assert stamp.read_bytes() == before
     assert not (dest / "node_modules").exists()
     assert not (dest / "package.json").exists()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_refuses_a_foreign_directory(tmp_path: Path) -> None:
+    dest = tmp_path / "other-server"
+    dest.mkdir()
+    secret = dest / "private.pem"
+    secret.write_text("secret\n", encoding="ascii")
+    proc = _refresh("--dest", str(dest), _git_sha())
+    assert proc.returncode == 2, proc.stderr
+    assert secret.read_text(encoding="ascii") == "secret\n"
+    assert dest.is_dir()
+    assert not (tmp_path / "other-server.previous").exists()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_refuses_filesystem_root() -> None:
+    proc = _refresh("--dry-run", "--dest", "/", _git_sha())
+    assert proc.returncode == 2
+    assert not Path("/DEPLOYED_SHA").exists()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_publish_writes_the_stamp(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "npm").write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+    (bin_dir / "python3").write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"pytest\" ]; then exit 0; fi\n"
+        "exit 0\n",
+        encoding="ascii",
+    )
+    (bin_dir / "npm").chmod(0o755)
+    (bin_dir / "python3").chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    dest = tmp_path / "host"
+    sha = _git_sha()
+    proc = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "refresh-host.sh"), "--dest", str(dest), sha],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert (dest / "DEPLOYED_SHA").read_text(encoding="ascii").strip() == sha
+    assert (dest / "package.json").is_file()
+    again = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "refresh-host.sh"), "--dest", str(dest), sha],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert again.returncode == 0, again.stderr
+    assert f"already installed: {sha}" in again.stdout

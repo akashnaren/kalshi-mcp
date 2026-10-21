@@ -12,8 +12,9 @@ full commit. A second run of the same commit prints already installed and does
 not rebuild.
 
 --dest is required and absolute. It must not be this checkout, a directory
-inside it, or a directory that contains it. The script does not restart the
-host and does not call Kalshi.
+inside it, or a directory that contains it. An existing dest must be empty
+or already this install. The script does not restart the host and does not
+call Kalshi.
 
 Options:
   --dest DIR   Absolute install directory. Required.
@@ -87,17 +88,54 @@ resolve_commit() {
     exit 1
   fi
   DEST_REAL=$(realpath -m "$DEST")
-  if [[ $DEST_REAL == "$SOURCE_REAL" || $DEST_REAL == "$SOURCE_REAL"/* || $SOURCE_REAL == "$DEST_REAL"/* ]]; then
+  local dest_slash source_slash
+  dest_slash="${DEST_REAL%/}/"
+  source_slash="${SOURCE_REAL%/}/"
+  if [[ $dest_slash == "$source_slash" || $dest_slash == "$source_slash"* || $source_slash == "$dest_slash"* ]]; then
     echo "error: --dest must be outside this git checkout ($SOURCE_REAL)" >&2
     echo "  scripts/refresh-host.sh --dry-run --dest /home/box/mcp/kalshi-mcp-main $SHA" >&2
     exit 2
   fi
 }
 
-current_stamp() {
-  CURRENT="unknown"
+dest_is_install() {
   if [[ -f $DEST_REAL/DEPLOYED_SHA ]]; then
-    CURRENT=$(tr -d '[:space:]' < "$DEST_REAL/DEPLOYED_SHA")
+    return 0
+  fi
+  if [[ -f $DEST_REAL/package.json ]] && grep -q '"name": "kalshi-readonly"' "$DEST_REAL/package.json"; then
+    return 0
+  fi
+  return 1
+}
+
+refuse_foreign_dest() {
+  [[ -e $DEST_REAL ]] || return 0
+  if [[ ! -d $DEST_REAL ]]; then
+    echo "error: --dest is not a directory" >&2
+    exit 2
+  fi
+  if [[ -z $(ls -A "$DEST_REAL") ]]; then
+    return 0
+  fi
+  if dest_is_install; then
+    return 0
+  fi
+  echo "error: --dest is not a kalshi-mcp install" >&2
+  echo "  scripts/refresh-host.sh --dry-run --dest /home/box/mcp/kalshi-mcp-main $SHA" >&2
+  exit 2
+}
+
+current_stamp() {
+  local line
+  CURRENT="unknown"
+  if [[ ! -f $DEST_REAL/DEPLOYED_SHA ]]; then
+    return 0
+  fi
+  IFS= read -r line < "$DEST_REAL/DEPLOYED_SHA" || line=""
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  if [[ -n $line ]]; then
+    CURRENT=$line
   fi
 }
 
@@ -164,6 +202,7 @@ publish() {
 main() {
   parse_args "$@"
   resolve_commit
+  refuse_foreign_dest
   current_stamp
   print_plan
   if [[ $CURRENT == "$FULL" ]]; then
