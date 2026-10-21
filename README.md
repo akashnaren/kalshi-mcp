@@ -56,6 +56,20 @@ python3 -c 'import json; from kalshi_readonly.tools import cash_or_positions; pr
 
 `~/.secrets/kalshi/key_id` and `private.pem` are enough when those env vars are unset. A host that says Not connected needs `npm run build` and a restart so `node dist/index.js` is the live process. Then `tools/list` is the check.
 
+`exchange_status` includes `build_sha`. That value is the first 12 characters of `<install root>/DEPLOYED_SHA`, read once when the process starts. A missing or invalid file reports `unknown`.
+
+## Refresh
+
+The box host tree is a `git archive` with no `.git`. Refresh it from a git checkout of this repo. The script writes `DEPLOYED_SHA`, then runs `npm ci`, `npm run build`, and `python3 -m pytest -q`. It does not restart the host and it does not call Kalshi. Restart the host after a successful run so the new process reads the stamp.
+
+```bash
+scripts/refresh-host.sh --help
+scripts/refresh-host.sh --dry-run --dest /home/box/mcp/kalshi-mcp-main 1ce6d72
+scripts/refresh-host.sh --dest /home/box/mcp/kalshi-mcp-main 1ce6d72
+```
+
+A second run of the same commit prints `already installed` and does not rebuild. `--dry-run` resolves the commit and writes nothing. `--dest` must be an absolute path outside this checkout.
+
 ## Install as a Cursor plugin
 
 Cursor hosts read `.cursor-plugin/plugin.json` (`kalshi-readonly`, version `0.3.0`). Root `plugin.json` and `mcp.json` stay in place. Skills are under `skills/`. The Finance Engineer checklist is `harness/SKILL.md`. Stdio launch for the Cursor plugin is root `mcp.json`: command `python3`, args `${PLUGIN_ROOT}/server.py`, env `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH`, `KALSHI_PRIVATE_KEY_PEM`, and `KALSHI_SAFE_MODE` (default on). No secrets are committed.
@@ -103,9 +117,9 @@ Set these in the host env, not on the command line:
 
 Omit the path env vars when `~/.secrets/kalshi/key_id` and `private.pem` already exist for that user. Do not commit those files.
 
-Finance Engineer override, and only that host. `harness/SKILL.md` owns the decision. Do not add a second Kalshi role harness. Install, in order:
+Finance Engineer override, and only that host. `harness/SKILL.md` owns the decision. Do not add a second Kalshi role harness. On the box, use Refresh above instead of a hand-run `npm install`. Install, in order:
 
-1. `npm run build` so `dist/index.js` matches this tree.
+1. From a git checkout, `scripts/refresh-host.sh --dest /home/box/mcp/kalshi-mcp-main <sha>` so that tree matches the commit. `--dry-run` prints the plan and writes nothing. A checkout you are editing still uses `npm run build` in that checkout.
 2. Point the host at `node /absolute/path/to/kalshi-mcp/dist/index.js` with `KALSHI_SAFE_MODE=0`.
 3. Restart the host. The Node process answers MCP `initialize` before the Python worker finishes `tools/list`, then `tools/list` waits for that list. The list is fixed for the life of the process (`listChanged` is false). A restart that leaves no live `dist/index.js` shows up as Not connected. Rebuild and restart so the host spawns the process again.
 4. Prove the new process with `tools/list`. It must include `fe_routine`, `find_best_bets`, `place_order`, `cancel_order`, `amend_order`, and `decrease_order`. stderr from the entry includes `safeMode=off` and those names. `exchange_status` is the cheap public call that the worker can reach Kalshi. It does not place.
@@ -154,7 +168,7 @@ The Finance Engineer sleeve sets `KALSHI_SAFE_MODE=0` and restarts the host. `pl
 
 | Tool | What it does |
 | --- | --- |
-| `exchange_status` | Public exchange status, plus Washington region attestation (`expires_at`, `expires_in_hours`, `expired`) from the note on disk. `washington_attestation` is null with a reason when that note is missing |
+| `exchange_status` | Public exchange status, plus Washington region attestation (`expires_at`, `expires_in_hours`, `expired`) from the note on disk. `washington_attestation` is null with a reason when that note is missing. `build_sha` is the first 12 characters of `DEPLOYED_SHA` at the install root, or `unknown` when that file is missing or invalid. The process reads the file once at startup |
 | `list_markets` | Public markets for liquid singles. Default `limit` 25, `status=open`, `mve_filter=exclude`, `liquid=true` (drop null yes bid and yes ask). Follows an empty page up to 4 times. Optional `cursor`, `series_ticker`, `event_ticker`. `ticker` is one market via `GET /markets/{ticker}` and includes `result` plus settlement fields Kalshi sent. List rows include those fields when present. `category` is a client prefix filter (sports, weather, politics, crypto, macro, other), not a Kalshi parameter. `mve_filter=all` and `liquid=false` and `status=any` widen the page |
 | `append_decision` | Validate one place, skip, or outcome and append it to the JSONL ledger. Does not trade. Does not rewrite history. `flb_band` allowed values: `<10¢`, `10–25¢`, `25–75¢`, `75–90¢`, `≥90¢` (`>=90¢` accepted). `rank_source` allowed values: `find_best_bets`, `fe_manual` |
 | `summarize_decisions` | Week and life-to-date stats from that ledger only. Does not invent N |

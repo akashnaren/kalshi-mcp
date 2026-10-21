@@ -1,4 +1,5 @@
 __pycache__/
+DEPLOYED_SHA
 *.py[cod]
 .venv/
 venv/
