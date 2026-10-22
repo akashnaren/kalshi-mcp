@@ -13,8 +13,8 @@ not rebuild.
 
 --dest is required and absolute. It must not be this checkout, a directory
 inside it, or a directory that contains it. An existing dest must be empty
-or already this install. The script does not restart the host and does not
-call Kalshi.
+or already this install. A directory that contains .git is not this install.
+The script does not restart the host and does not call Kalshi.
 
 Options:
   --dest DIR   Absolute install directory. Required.
@@ -99,6 +99,7 @@ resolve_commit() {
 }
 
 dest_is_install() {
+  [[ ! -e $DEST_REAL/.git ]] || return 1
   [[ -f $DEST_REAL/package.json ]] || return 1
   [[ -f $DEST_REAL/server.py || -f $DEST_REAL/kalshi_readonly/__init__.py ]] || return 1
   python3 -c 'import json,sys; name=json.load(open(sys.argv[1], encoding="utf-8")).get("name"); raise SystemExit(0 if name=="kalshi-readonly" else 1)' "$DEST_REAL/package.json"
@@ -106,11 +107,13 @@ dest_is_install() {
 
 refuse_foreign_dest() {
   [[ -e $DEST_REAL ]] || return 0
-  if [[ ! -d $DEST_REAL ]]; then
+  if [[ -L $DEST_REAL || ! -d $DEST_REAL ]]; then
     echo "error: --dest is not a directory" >&2
     exit 2
   fi
-  if [[ -z $(ls -A "$DEST_REAL") ]]; then
+  local entries
+  entries=$(ls -A -- "$DEST_REAL") || { echo "error: cannot read --dest" >&2; exit 2; }
+  if [[ -z $entries ]]; then
     return 0
   fi
   if dest_is_install; then
@@ -163,20 +166,64 @@ preflight() {
   fi
 }
 
-publish() {
-  local staging previous
+acquire_lock() {
+  local lock
+  lock="${DEST_REAL}.refresh.lock"
+  if [[ -L $lock ]]; then
+    echo "error: refresh lock is a symlink" >&2
+    exit 2
+  fi
   mkdir -p "$(dirname "$DEST_REAL")"
-  exec 9>"${DEST_REAL}.refresh.lock"
+  exec 9>>"$lock"
+  if [[ -L $lock ]]; then
+    echo "error: refresh lock is a symlink" >&2
+    exit 2
+  fi
   if ! flock -n 9; then
     echo "error: another refresh holds ${DEST_REAL}.refresh.lock" >&2
     echo "  scripts/refresh-host.sh --dry-run --dest $DEST $SHA" >&2
     exit 1
   fi
+}
+
+require_refresh_tree() {
+  local path=$1 label=$2 entries saved
+  if [[ ! -e $path && ! -L $path ]]; then
+    return 0
+  fi
+  if [[ -L $path ]]; then
+    echo "error: $label is a symlink" >&2
+    exit 2
+  fi
+  if [[ ! -d $path ]]; then
+    echo "error: $label is not a directory" >&2
+    exit 2
+  fi
+  entries=$(ls -A -- "$path") || { echo "error: cannot read $label" >&2; exit 2; }
+  if [[ -z $entries ]]; then
+    return 0
+  fi
+  saved=$DEST_REAL
+  DEST_REAL=$path
+  if dest_is_install; then
+    DEST_REAL=$saved
+    return 0
+  fi
+  DEST_REAL=$saved
+  echo "error: $label is not a kalshi-mcp install" >&2
+  exit 2
+}
+
+publish() {
+  local staging previous discarded
   staging="${DEST_REAL}.staging"
   previous="${DEST_REAL}.previous"
+  discarded="${DEST_REAL}.previous.old"
+  require_refresh_tree "$previous" "--dest.previous"
   if [[ ! -e $DEST_REAL && -e $previous ]]; then
     mv "$previous" "$DEST_REAL"
   fi
+  require_refresh_tree "$staging" "--dest.staging"
   rm -rf "$staging"
   mkdir -p "$staging"
   git -C "$SOURCE_REAL" archive --format=tar "$FULL" | tar -x -C "$staging"
@@ -188,10 +235,10 @@ publish() {
     npm run build
     python3 -m pytest -q
   )
-  local discarded
-  discarded="${DEST_REAL}.previous.old"
+  require_refresh_tree "$discarded" "--dest.previous.old"
   rm -rf "$discarded"
   if [[ -e $previous ]]; then
+    require_refresh_tree "$previous" "--dest.previous"
     mv "$previous" "$discarded"
   fi
   if [[ -e $DEST_REAL ]]; then
@@ -199,13 +246,16 @@ publish() {
   fi
   if ! mv "$staging" "$DEST_REAL"; then
     if [[ ! -e $DEST_REAL && -e $previous ]]; then
+      require_refresh_tree "$previous" "--dest.previous"
       mv "$previous" "$DEST_REAL"
     fi
     if [[ ! -e $previous && -e $discarded ]]; then
+      require_refresh_tree "$discarded" "--dest.previous.old"
       mv "$discarded" "$previous"
     fi
     exit 1
   fi
+  require_refresh_tree "$discarded" "--dest.previous.old"
   rm -rf "$discarded"
   echo "deployed: $FULL"
   echo "dest: $DEST_REAL"
@@ -215,6 +265,9 @@ publish() {
 main() {
   parse_args "$@"
   resolve_commit
+  if [[ $DRY_RUN -eq 0 ]]; then
+    acquire_lock
+  fi
   refuse_foreign_dest
   current_stamp
   print_plan

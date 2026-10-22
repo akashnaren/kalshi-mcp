@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -88,8 +89,6 @@ def test_exchange_status_build_sha_is_read_once_at_startup(tmp_path: Path) -> No
 
 
 def test_parse_build_sha_accepts_one_hex_token_or_unknown() -> None:
-    from kalshi_readonly.build import parse_build_sha
-
     twelve = b"ABCDEF012345"
     full = (_STAMP + "\n").encode("ascii")
     assert parse_build_sha(full) == _STAMP[:12]
@@ -111,14 +110,30 @@ def _git_sha() -> str:
     ).strip()
 
 
-def _refresh(*args: str) -> subprocess.CompletedProcess[str]:
+def _refresh(
+    *args: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", str(ROOT / "scripts" / "refresh-host.sh"), *args],
         cwd=ROOT,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def _tool_stubs(tmp_path: Path) -> dict[str, str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("npm", "python3"):
+        path = bin_dir / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+        path.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    return env
 
 
 def test_refresh_help_includes_examples() -> None:
@@ -135,6 +150,7 @@ def test_refresh_dry_run_writes_nothing(tmp_path: Path) -> None:
     proc = _refresh("--dry-run", "--dest", str(dest), _git_sha())
     assert proc.returncode == 0, proc.stderr
     assert not dest.exists()
+    assert not (tmp_path / "host.refresh.lock").exists()
     assert "git archive" in proc.stdout
     assert _git_sha() in proc.stdout
     again = _refresh("--dry-run", "--dest", str(dest), _git_sha())
@@ -268,3 +284,113 @@ def test_refresh_publish_writes_the_stamp(tmp_path: Path) -> None:
     )
     assert again.returncode == 0, again.stderr
     assert f"already installed: {sha}" in again.stdout
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_refuses_an_unreadable_directory(tmp_path: Path) -> None:
+    dest = tmp_path / "host"
+    dest.mkdir()
+    kept = dest / "keep.txt"
+    kept.write_text("keep\n", encoding="ascii")
+    previous = tmp_path / "host.previous"
+    dest.chmod(0)
+    try:
+        proc = _refresh("--dest", str(dest), _git_sha(), env=_tool_stubs(tmp_path))
+        assert proc.returncode == 2, proc.stderr
+        assert "cannot read --dest" in proc.stderr
+        assert not previous.exists()
+    finally:
+        if dest.exists():
+            dest.chmod(0o700)
+        if previous.exists():
+            previous.chmod(0o700)
+    assert kept.read_text(encoding="ascii") == "keep\n"
+    assert dest.is_dir()
+    assert not previous.exists()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_refuses_a_git_clone(tmp_path: Path) -> None:
+    dest = tmp_path / "clone"
+    dest.mkdir()
+    (dest / "package.json").write_text('{"name": "kalshi-readonly"}\n', encoding="utf-8")
+    (dest / "server.py").write_text("\n", encoding="utf-8")
+    kept = dest / "keep.txt"
+    kept.write_text("uncommitted\n", encoding="ascii")
+    subprocess.run(["git", "init"], cwd=dest, check=True, capture_output=True, text=True)
+    proc = _refresh("--dest", str(dest), _git_sha(), env=_tool_stubs(tmp_path))
+    assert proc.returncode == 2, proc.stderr
+    assert kept.read_text(encoding="ascii") == "uncommitted\n"
+    assert dest.is_dir()
+    assert not (tmp_path / "clone.previous").exists()
+    assert not (tmp_path / "clone.staging").exists()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_refuses_a_symlinked_lock(tmp_path: Path) -> None:
+    dest = tmp_path / "host"
+    dest.mkdir()
+    precious = tmp_path / "precious.txt"
+    precious.write_text("keep\n", encoding="ascii")
+    lock = tmp_path / "host.refresh.lock"
+    lock.symlink_to(precious)
+    proc = _refresh("--dest", str(dest), _git_sha(), env=_tool_stubs(tmp_path))
+    assert proc.returncode == 2, proc.stderr
+    assert precious.read_text(encoding="ascii") == "keep\n"
+    assert lock.is_symlink()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_refuses_a_symlinked_staging_dir(tmp_path: Path) -> None:
+    dest = tmp_path / "host"
+    dest.mkdir()
+    precious = tmp_path / "precious"
+    precious.mkdir()
+    (precious / "keep.txt").write_text("keep\n", encoding="ascii")
+    (tmp_path / "host.staging").symlink_to(precious)
+    proc = _refresh("--dest", str(dest), _git_sha(), env=_tool_stubs(tmp_path))
+    assert proc.returncode == 2, proc.stderr
+    assert (precious / "keep.txt").read_text(encoding="ascii") == "keep\n"
+    assert not dest.joinpath("keep.txt").exists()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_refuses_a_symlinked_previous_old(tmp_path: Path) -> None:
+    dest = tmp_path / "host"
+    dest.mkdir()
+    precious = tmp_path / "precious"
+    precious.mkdir()
+    (precious / "keep.txt").write_text("keep\n", encoding="ascii")
+    (tmp_path / "host.previous.old").symlink_to(precious)
+    proc = _refresh("--dest", str(dest), _git_sha(), env=_tool_stubs(tmp_path))
+    assert proc.returncode == 2, proc.stderr
+    assert (precious / "keep.txt").read_text(encoding="ascii") == "keep\n"
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_refuses_a_foreign_previous_dir(tmp_path: Path) -> None:
+    previous = tmp_path / "host.previous"
+    previous.mkdir()
+    (previous / "keep.txt").write_text("keep\n", encoding="ascii")
+    proc = _refresh("--dest", str(tmp_path / "host"), _git_sha(), env=_tool_stubs(tmp_path))
+    assert proc.returncode == 2, proc.stderr
+    assert (previous / "keep.txt").read_text(encoding="ascii") == "keep\n"
+    assert not (tmp_path / "host").exists()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_takes_the_lock_before_the_install_check(tmp_path: Path) -> None:
+    dest = tmp_path / "host"
+    dest.mkdir()
+    (dest / "private.pem").write_text("secret\n", encoding="ascii")
+    lock_path = tmp_path / "host.refresh.lock"
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        proc = _refresh("--dest", str(dest), _git_sha(), env=_tool_stubs(tmp_path))
+    finally:
+        os.close(fd)
+    assert proc.returncode == 1, proc.stderr
+    assert "another refresh holds" in proc.stderr
+    assert (dest / "private.pem").read_text(encoding="ascii") == "secret\n"
+    assert not (tmp_path / "host.previous").exists()
