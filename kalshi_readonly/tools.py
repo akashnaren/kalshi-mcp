@@ -11,6 +11,7 @@ import urllib.parse
 
 from kalshi_readonly import __version__
 from kalshi_readonly.attestation import load_washington_attestation
+from kalshi_readonly.build import BUILD_SHA
 from kalshi_readonly.guard import safe_mode_enabled
 from kalshi_readonly.http import auth_get, public_get
 from kalshi_readonly.report import present_balance, present_fills, present_positions
@@ -62,6 +63,7 @@ def exchange_status(_args: dict | None = None) -> dict:
         raise RuntimeError("unexpected exchange status payload")
     out = dict(payload)
     out.update(load_washington_attestation())
+    out["build_sha"] = BUILD_SHA
     return out
 
 
