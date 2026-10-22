@@ -99,13 +99,9 @@ resolve_commit() {
 }
 
 dest_is_install() {
-  if [[ -f $DEST_REAL/DEPLOYED_SHA ]]; then
-    return 0
-  fi
-  if [[ -f $DEST_REAL/package.json ]] && grep -q '"name": "kalshi-readonly"' "$DEST_REAL/package.json"; then
-    return 0
-  fi
-  return 1
+  [[ -f $DEST_REAL/package.json ]] || return 1
+  [[ -f $DEST_REAL/server.py || -f $DEST_REAL/kalshi_readonly/__init__.py ]] || return 1
+  python3 -c 'import json,sys; name=json.load(open(sys.argv[1], encoding="utf-8")).get("name"); raise SystemExit(0 if name=="kalshi-readonly" else 1)' "$DEST_REAL/package.json"
 }
 
 refuse_foreign_dest() {
@@ -126,16 +122,21 @@ refuse_foreign_dest() {
 }
 
 current_stamp() {
-  local line
+  local raw trimmed size
   CURRENT="unknown"
   if [[ ! -f $DEST_REAL/DEPLOYED_SHA ]]; then
     return 0
   fi
-  IFS= read -r line < "$DEST_REAL/DEPLOYED_SHA" || line=""
-  line="${line#"${line%%[![:space:]]*}"}"
-  line="${line%"${line##*[![:space:]]}"}"
-  if [[ -n $line ]]; then
-    CURRENT=$line
+  size=$(wc -c < "$DEST_REAL/DEPLOYED_SHA")
+  size=${size//[[:space:]]/}
+  if (( size > 128 )); then
+    return 0
+  fi
+  raw=$(<"$DEST_REAL/DEPLOYED_SHA")
+  trimmed="${raw#"${raw%%[![:space:]]*}"}"
+  trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+  if [[ $trimmed == "$FULL" ]]; then
+    CURRENT=$FULL
   fi
 }
 
@@ -144,7 +145,7 @@ print_plan() {
   echo "dest: $DEST_REAL"
   echo "sha: $FULL"
   echo "current: $CURRENT"
-  echo "steps: git archive, DEPLOYED_SHA, npm ci, npm run build, python3 -m pytest -q"
+  echo "steps: git archive, DEPLOYED_SHA, npm ci --include=dev, npm run build, python3 -m pytest -q"
 }
 
 preflight() {
@@ -183,17 +184,29 @@ publish() {
   mv "$staging/DEPLOYED_SHA.tmp" "$staging/DEPLOYED_SHA"
   (
     cd "$staging"
-    npm ci
+    npm ci --include=dev
     npm run build
     python3 -m pytest -q
   )
+  local discarded
+  discarded="${DEST_REAL}.previous.old"
+  rm -rf "$discarded"
   if [[ -e $previous ]]; then
-    rm -rf "$previous"
+    mv "$previous" "$discarded"
   fi
   if [[ -e $DEST_REAL ]]; then
     mv "$DEST_REAL" "$previous"
   fi
-  mv "$staging" "$DEST_REAL"
+  if ! mv "$staging" "$DEST_REAL"; then
+    if [[ ! -e $DEST_REAL && -e $previous ]]; then
+      mv "$previous" "$DEST_REAL"
+    fi
+    if [[ ! -e $previous && -e $discarded ]]; then
+      mv "$discarded" "$previous"
+    fi
+    exit 1
+  fi
+  rm -rf "$discarded"
   echo "deployed: $FULL"
   echo "dest: $DEST_REAL"
   echo "restart: required"

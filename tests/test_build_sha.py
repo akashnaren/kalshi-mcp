@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from kalshi_readonly.build import parse_build_sha
+
 ROOT = Path(__file__).resolve().parents[1]
 _CHECKOUT = (ROOT / ".git").exists()
 _STAMP = "1ce6d72abcde0123456789abcdef0123456789ab"
@@ -160,6 +162,8 @@ def test_refresh_already_installed_is_a_noop(tmp_path: Path) -> None:
     dest = tmp_path / "host"
     dest.mkdir()
     sha = _git_sha()
+    (dest / "package.json").write_text('{"name": "kalshi-readonly"}\n', encoding="utf-8")
+    (dest / "server.py").write_text("\n", encoding="utf-8")
     stamp = dest / "DEPLOYED_SHA"
     stamp.write_text(sha + "\n", encoding="ascii")
     before = stamp.read_bytes()
@@ -168,7 +172,6 @@ def test_refresh_already_installed_is_a_noop(tmp_path: Path) -> None:
     assert f"already installed: {sha}" in proc.stdout
     assert stamp.read_bytes() == before
     assert not (dest / "node_modules").exists()
-    assert not (dest / "package.json").exists()
 
 
 @pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
@@ -185,6 +188,34 @@ def test_refresh_refuses_a_foreign_directory(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_refuses_a_stray_deployed_sha(tmp_path: Path) -> None:
+    dest = tmp_path / "other"
+    dest.mkdir()
+    (dest / "notes.txt").write_text("keep\n", encoding="ascii")
+    (dest / "DEPLOYED_SHA").write_text("", encoding="ascii")
+    proc = _refresh("--dest", str(dest), _git_sha())
+    assert proc.returncode == 2, proc.stderr
+    assert (dest / "notes.txt").read_text(encoding="ascii") == "keep\n"
+    assert not (tmp_path / "other.previous").exists()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_does_not_treat_a_dirty_stamp_as_installed(tmp_path: Path) -> None:
+    dest = tmp_path / "host"
+    dest.mkdir()
+    (dest / "package.json").write_text('{"name": "kalshi-readonly"}\n', encoding="utf-8")
+    (dest / "server.py").write_text("\n", encoding="utf-8")
+    sha = _git_sha()
+    stamp = dest / "DEPLOYED_SHA"
+    stamp.write_text(sha + "\nnot-hex\n", encoding="ascii")
+    proc = _refresh("--dry-run", "--dest", str(dest), sha)
+    assert proc.returncode == 0, proc.stderr
+    assert "already installed" not in proc.stdout
+    assert "current: unknown" in proc.stdout
+    assert stamp.read_text(encoding="ascii") == sha + "\nnot-hex\n"
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
 def test_refresh_refuses_filesystem_root() -> None:
     proc = _refresh("--dry-run", "--dest", "/", _git_sha())
     assert proc.returncode == 2
@@ -195,17 +226,20 @@ def test_refresh_refuses_filesystem_root() -> None:
 def test_refresh_publish_writes_the_stamp(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "npm").write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+    log = tmp_path / "commands"
+    (bin_dir / "npm").write_text(
+        "#!/bin/sh\nprintf '%s %s\\n' \"$(pwd)\" \"npm $*\" >> \"$REFRESH_LOG\"\nexit 0\n",
+        encoding="ascii",
+    )
     (bin_dir / "python3").write_text(
-        "#!/bin/sh\n"
-        "if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"pytest\" ]; then exit 0; fi\n"
-        "exit 0\n",
+        "#!/bin/sh\nprintf '%s %s\\n' \"$(pwd)\" \"python3 $*\" >> \"$REFRESH_LOG\"\nexit 0\n",
         encoding="ascii",
     )
     (bin_dir / "npm").chmod(0o755)
     (bin_dir / "python3").chmod(0o755)
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["REFRESH_LOG"] = str(log)
     dest = tmp_path / "host"
     sha = _git_sha()
     proc = subprocess.run(
@@ -218,7 +252,12 @@ def test_refresh_publish_writes_the_stamp(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert (dest / "DEPLOYED_SHA").read_text(encoding="ascii").strip() == sha
+    assert parse_build_sha((dest / "DEPLOYED_SHA").read_bytes()) == sha[:12]
     assert (dest / "package.json").is_file()
+    lines = log.read_text(encoding="ascii").splitlines()
+    assert any(line.endswith(" npm ci --include=dev") and ".staging" in line for line in lines)
+    assert any(line.endswith(" npm run build") and ".staging" in line for line in lines)
+    assert any(line.endswith(" python3 -m pytest -q") and ".staging" in line for line in lines)
     again = subprocess.run(
         ["bash", str(ROOT / "scripts" / "refresh-host.sh"), "--dest", str(dest), sha],
         cwd=ROOT,
