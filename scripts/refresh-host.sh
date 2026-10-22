@@ -87,6 +87,9 @@ resolve_commit() {
     echo "  git -C $SOURCE_REAL fetch origin main" >&2
     exit 1
   fi
+  while [[ $DEST == */ && $DEST != / ]]; do
+    DEST=${DEST%/}
+  done
   if [[ -L $DEST ]]; then
     echo "error: --dest is a symlink" >&2
     echo "  scripts/refresh-host.sh --dry-run --dest /home/box/mcp/kalshi-mcp-main $SHA" >&2
@@ -273,6 +276,7 @@ main() {
   refuse_foreign_dest
   if [[ $DRY_RUN -eq 0 ]]; then
     acquire_lock
+    refuse_foreign_dest
   fi
   current_stamp
   print_plan

@@ -454,3 +454,51 @@ def test_refresh_refuses_a_symlinked_dest(tmp_path: Path) -> None:
     assert not (tmp_path / "real.refresh.lock").exists()
     assert not (tmp_path / "host.refresh.lock").exists()
     assert not (tmp_path / "real.previous").exists()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_rechecks_a_foreign_dest_after_the_lock(tmp_path: Path) -> None:
+    dest = tmp_path / "host"
+    dest.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    npm = bin_dir / "npm"
+    npm.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+    npm.chmod(0o755)
+    python = bin_dir / "python3"
+    python.write_text(_python_stub(log=False), encoding="ascii")
+    python.chmod(0o755)
+    real_flock = shutil.which("flock")
+    assert real_flock is not None
+    quoted_dest = shlex.quote(str(dest))
+    flock = bin_dir / "flock"
+    flock.write_text(
+        "#!/bin/sh\n"
+        f"rm -rf {quoted_dest}\n"
+        f"mkdir -p {quoted_dest}\n"
+        f"printf 'secret\\n' > {quoted_dest}/private.pem\n"
+        f"exec {shlex.quote(real_flock)} \"$@\"\n",
+        encoding="ascii",
+    )
+    flock.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    proc = _refresh("--dest", str(dest), _git_sha(), env=env)
+    assert proc.returncode == 2, proc.stderr
+    assert (dest / "private.pem").read_text(encoding="ascii") == "secret\n"
+    assert not (tmp_path / "host.previous").exists()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_refuses_a_symlinked_dest_with_a_trailing_slash(tmp_path: Path) -> None:
+    target = tmp_path / "real"
+    target.mkdir()
+    link = tmp_path / "lnk"
+    link.symlink_to(target, target_is_directory=True)
+    proc = _refresh("--dest", f"{link}/", _git_sha(), env=_tool_stubs(tmp_path))
+    assert proc.returncode == 2, proc.stderr
+    assert "symlink" in proc.stderr
+    assert list(target.iterdir()) == []
+    assert not (tmp_path / "real.refresh.lock").exists()
+    assert not (tmp_path / "lnk.refresh.lock").exists()
+    assert not (tmp_path / "real.previous").exists()
