@@ -62,6 +62,8 @@ python3 -c 'import json; from kalshi_readonly.tools import cash_or_positions; pr
 
 The box host tree is a `git archive` with no `.git`. Refresh it from a git checkout of this repo. The script writes `DEPLOYED_SHA`, then runs `npm ci`, `npm run build`, and `python3 -m pytest -q`. It does not restart the host and it does not call Kalshi. Restart the host after a successful run so the new process reads the stamp.
 
+After `scripts/refresh-host.sh`, the stdio MCP has to be fully respawned: stop the old node and python processes, then reconnect. The python child's cwd otherwise follows the renamed `.previous` tree.
+
 ```bash
 scripts/refresh-host.sh --help
 scripts/refresh-host.sh --dry-run --dest /home/box/mcp/kalshi-mcp-main 1ce6d72
