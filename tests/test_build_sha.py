@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -124,13 +125,31 @@ def _refresh(
     )
 
 
+def _python_stub(*, log: bool) -> str:
+    real = shutil.which("python3")
+    assert real is not None
+    logged = ""
+    if log:
+        logged = "printf '%s %s\\n' \"$(pwd)\" \"python3 $*\" >> \"$REFRESH_LOG\"\n"
+    return (
+        "#!/bin/sh\n"
+        f"{logged}"
+        'if [ "$1" = "-c" ]; then\n'
+        f"  exec {shlex.quote(real)} \"$@\"\n"
+        "fi\n"
+        "exit 0\n"
+    )
+
+
 def _tool_stubs(tmp_path: Path) -> dict[str, str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name in ("npm", "python3"):
-        path = bin_dir / name
-        path.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
-        path.chmod(0o755)
+    npm = bin_dir / "npm"
+    npm.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+    npm.chmod(0o755)
+    python = bin_dir / "python3"
+    python.write_text(_python_stub(log=False), encoding="ascii")
+    python.chmod(0o755)
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     return env
@@ -247,10 +266,7 @@ def test_refresh_publish_writes_the_stamp(tmp_path: Path) -> None:
         "#!/bin/sh\nprintf '%s %s\\n' \"$(pwd)\" \"npm $*\" >> \"$REFRESH_LOG\"\nexit 0\n",
         encoding="ascii",
     )
-    (bin_dir / "python3").write_text(
-        "#!/bin/sh\nprintf '%s %s\\n' \"$(pwd)\" \"python3 $*\" >> \"$REFRESH_LOG\"\nexit 0\n",
-        encoding="ascii",
-    )
+    (bin_dir / "python3").write_text(_python_stub(log=True), encoding="ascii")
     (bin_dir / "npm").chmod(0o755)
     (bin_dir / "python3").chmod(0o755)
     env = os.environ.copy()
@@ -299,6 +315,7 @@ def test_refresh_refuses_an_unreadable_directory(tmp_path: Path) -> None:
         assert proc.returncode == 2, proc.stderr
         assert "cannot read --dest" in proc.stderr
         assert not previous.exists()
+        assert not (tmp_path / "host.refresh.lock").exists()
     finally:
         if dest.exists():
             dest.chmod(0o700)
@@ -379,10 +396,9 @@ def test_refresh_refuses_a_foreign_previous_dir(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
-def test_refresh_takes_the_lock_before_the_install_check(tmp_path: Path) -> None:
+def test_refresh_takes_the_lock_before_installing(tmp_path: Path) -> None:
     dest = tmp_path / "host"
     dest.mkdir()
-    (dest / "private.pem").write_text("secret\n", encoding="ascii")
     lock_path = tmp_path / "host.refresh.lock"
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
@@ -392,5 +408,49 @@ def test_refresh_takes_the_lock_before_the_install_check(tmp_path: Path) -> None
         os.close(fd)
     assert proc.returncode == 1, proc.stderr
     assert "another refresh holds" in proc.stderr
-    assert (dest / "private.pem").read_text(encoding="ascii") == "secret\n"
+    assert list(dest.iterdir()) == []
+    assert not (tmp_path / "host.staging").exists()
     assert not (tmp_path / "host.previous").exists()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_refuses_a_package_name_mismatch(tmp_path: Path) -> None:
+    dest = tmp_path / "host"
+    dest.mkdir()
+    (dest / "package.json").write_text('{"name": "not-kalshi"}\n', encoding="utf-8")
+    (dest / "server.py").write_text("\n", encoding="utf-8")
+    kept = dest / "keep.txt"
+    kept.write_text("keep\n", encoding="ascii")
+    proc = _refresh("--dest", str(dest), _git_sha(), env=_tool_stubs(tmp_path))
+    assert proc.returncode == 2, proc.stderr
+    assert kept.read_text(encoding="ascii") == "keep\n"
+    assert dest.is_dir()
+    assert not (tmp_path / "host.previous").exists()
+    assert not (tmp_path / "host.refresh.lock").exists()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_does_not_create_a_lock_when_dest_is_refused(tmp_path: Path) -> None:
+    dest = tmp_path / "other"
+    dest.mkdir()
+    (dest / "private.pem").write_text("secret\n", encoding="ascii")
+    proc = _refresh("--dest", str(dest), _git_sha(), env=_tool_stubs(tmp_path))
+    assert proc.returncode == 2, proc.stderr
+    assert (dest / "private.pem").read_text(encoding="ascii") == "secret\n"
+    assert not (tmp_path / "other.refresh.lock").exists()
+    assert not (tmp_path / "other.previous").exists()
+
+
+@pytest.mark.skipif(not _CHECKOUT, reason="refresh checks need the git checkout, not a git archive")
+def test_refresh_refuses_a_symlinked_dest(tmp_path: Path) -> None:
+    target = tmp_path / "real"
+    target.mkdir()
+    link = tmp_path / "host"
+    link.symlink_to(target, target_is_directory=True)
+    proc = _refresh("--dest", str(link), _git_sha(), env=_tool_stubs(tmp_path))
+    assert proc.returncode == 2, proc.stderr
+    assert "symlink" in proc.stderr
+    assert list(target.iterdir()) == []
+    assert not (tmp_path / "real.refresh.lock").exists()
+    assert not (tmp_path / "host.refresh.lock").exists()
+    assert not (tmp_path / "real.previous").exists()

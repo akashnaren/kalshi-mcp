@@ -87,6 +87,11 @@ resolve_commit() {
     echo "  git -C $SOURCE_REAL fetch origin main" >&2
     exit 1
   fi
+  if [[ -L $DEST ]]; then
+    echo "error: --dest is a symlink" >&2
+    echo "  scripts/refresh-host.sh --dry-run --dest /home/box/mcp/kalshi-mcp-main $SHA" >&2
+    exit 2
+  fi
   DEST_REAL=$(realpath -m "$DEST")
   local dest_slash source_slash
   dest_slash="${DEST_REAL%/}/"
@@ -107,7 +112,7 @@ dest_is_install() {
 
 refuse_foreign_dest() {
   [[ -e $DEST_REAL ]] || return 0
-  if [[ -L $DEST_REAL || ! -d $DEST_REAL ]]; then
+  if [[ ! -d $DEST_REAL ]]; then
     echo "error: --dest is not a directory" >&2
     exit 2
   fi
@@ -265,10 +270,10 @@ publish() {
 main() {
   parse_args "$@"
   resolve_commit
+  refuse_foreign_dest
   if [[ $DRY_RUN -eq 0 ]]; then
     acquire_lock
   fi
-  refuse_foreign_dest
   current_stamp
   print_plan
   if [[ $CURRENT == "$FULL" ]]; then
