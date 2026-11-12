@@ -50,6 +50,7 @@ def test_read_tools_stay_registered_when_safe_mode_defaults_on(monkeypatch: pyte
         "exchange_status",
         "list_markets",
         "find_best_bets",
+        "shard_balances",
         "append_decision",
         "summarize_decisions",
         "cash_or_positions",

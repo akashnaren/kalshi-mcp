@@ -4,6 +4,8 @@ GET, POST, and DELETE all use the same RSA-PSS headers. The body is not part of
 the signature. Other methods are refused.
 
 429 and 503 retry with Retry-After when Kalshi sends one (honored up to 30s).
+Kalshi 429 responses do not include Retry-After.
+https://docs.kalshi.com/getting_started/rate_limits
 When that header is missing or not a usable delay, the waits are 2s, 4s, 8s,
 then 16s, plus up to 0.25s of jitter. The next step of that schedule is capped
 at 30s. That is not the 0.25/0.5/1/2 schedule. Those statuses get at most 5
@@ -79,7 +81,6 @@ def _url(path: str, query: dict | None) -> str:
     return f"{base}?{urllib.parse.urlencode(query)}"
 
 
-_DETAIL_KEYS = ("code", "message", "details")
 _DETAIL_CAP = 300
 
 
@@ -96,8 +97,28 @@ def _detail(body: bytes) -> str:
     source = parsed.get("error")
     if not isinstance(source, dict):
         source = parsed
-    parts = [source.get(key) for key in _DETAIL_KEYS]
-    detail = ": ".join(part for part in parts if isinstance(part, str) and part)
+    code = source.get("code")
+    if code == "market_inactive":
+        # market_closed was renamed. Halted markets use the new code too.
+        # https://docs.kalshi.com/changelog
+        code = "market_closed"
+    parts: list[str] = []
+    if isinstance(code, str) and code:
+        parts.append(code)
+    for key in ("message", "details"):
+        value = source.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    shard = source.get("shard_id")
+    if shard is None:
+        # exchange_index is the shard id.
+        # https://docs.kalshi.com/getting_started/exchange_sharding
+        shard = source.get("exchange_index")
+    if isinstance(shard, int) and not isinstance(shard, bool):
+        parts.append(f"shard_id={shard}")
+    elif isinstance(shard, str) and shard.strip():
+        parts.append(f"shard_id={shard.strip()}")
+    detail = ": ".join(parts)
     if "PRIVATE KEY" in detail or "-----BEGIN" in detail:
         return ""
     return detail[:_DETAIL_CAP]
@@ -127,7 +148,11 @@ def _retry_after_seconds(header: str | None) -> float | None:
 
 
 def _delay(attempt: int, retry_after: str | None) -> float:
-    """Honor Retry-After. Otherwise 2, 4, 8, 16, then 30 (plus jitter)."""
+    """Honor Retry-After. Otherwise 2, 4, 8, 16, then 30 (plus jitter).
+
+    A 429 from Kalshi has no Retry-After, so it takes the exponential path.
+    https://docs.kalshi.com/getting_started/rate_limits
+    """
     parsed = _retry_after_seconds(retry_after)
     if parsed is not None:
         return min(_MAX_DELAY, parsed)

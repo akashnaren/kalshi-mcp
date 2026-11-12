@@ -2,7 +2,8 @@
 
 Mutating tools are omitted from the advertised list while KALSHI_SAFE_MODE is
 on (the default). Handlers still refuse if something calls them anyway.
-There is no withdraw, deposit, or strategy tool.
+There is no withdraw, deposit, or external transfer tool. A same-account
+shard transfer is confirm-gated with the other mutations.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from kalshi_readonly.attestation import load_washington_attestation
 from kalshi_readonly.build import BUILD_SHA
 from kalshi_readonly.guard import safe_mode_enabled
 from kalshi_readonly.http import auth_get, public_get
+from kalshi_readonly.shards import SHARD_BALANCE_TOOL, SHARD_TRANSFER_TOOL, shard_balances, transfer_between_shards
 from kalshi_readonly.report import present_balance, present_fills, present_positions
 from kalshi_readonly.stdio import run_server
 from kalshi_readonly.ledger import (
@@ -33,14 +35,31 @@ from kalshi_readonly.trade import (
 
 _INCLUDES = ("balance", "cash", "positions", "both", "fills")
 _MVE_PAGES = 4
+# Client prefix buckets. Not a Kalshi query parameter. Series.category is the
+# exchange's own label (https://docs.kalshi.com/api-reference/market/get-series).
 _CATEGORY_PREFIXES = {
     "sports": ("KXNFL", "KXNBA", "KXNHL", "KXMLB", "KXNCAAF", "KXNCAAB", "KXEPL", "KXUCL", "KXUFC", "KXUSL", "KXINTL"),
     "weather": ("KXHIGH", "KXLOWT", "KXLOW", "KXRAIN", "KXSNOW", "KXHURR", "KXTEMP"),
     "politics": ("KXPRES", "KXSENATE", "KXHOUSE", "KXGOV", "KXELECT"),
+    "elections": ("KXELECT", "KXPRES", "KXSENATE", "KXHOUSE", "KXGOV", "KXPRIMARY", "KXVOTE", "KXBALLOT", "KXINAUG"),
+    "entertainment": (
+        "KXOSCAR",
+        "KXEMMY",
+        "KXGRAMMY",
+        "KXGOLDENGLOBE",
+        "KXBOXOFFICE",
+        "KXEUROVISION",
+        "KXNETFLIX",
+        "KXSPOTIFY",
+        "KXBILLBOARD",
+        "KXMOVIE",
+        "KXRT",
+    ),
     "crypto": ("KXBTC", "KXETH"),
     "macro": ("KXFED", "KXCPI", "KXGDP", "KXPAYROLL", "KXUNEMP", "KXJOB", "KXFOMC"),
     "other": (),
 }
+_CATEGORY_NAMES = "sports, weather, politics, elections, entertainment, crypto, macro, or other"
 
 
 def _limit(args: dict, default: int) -> int:
@@ -119,6 +138,20 @@ _SETTLEMENT_FIELDS = (
 )
 
 
+def _listed_count(market: dict, fp_key: str, legacy_key: str):
+    """Current Market counts are *_fp strings. Integer volume is often absent.
+
+    https://docs.kalshi.com/api-reference/market/get-market
+    """
+    legacy = market.get(legacy_key)
+    if legacy not in (None, ""):
+        return legacy
+    fp = market.get(fp_key)
+    if fp not in (None, ""):
+        return fp
+    return None
+
+
 def _compact_market(market: dict) -> dict:
     row = {
         "ticker": market.get("ticker"),
@@ -129,10 +162,18 @@ def _compact_market(market: dict) -> dict:
         "yes_ask": market.get("yes_ask"),
         "yes_bid_dollars": market.get("yes_bid_dollars"),
         "yes_ask_dollars": market.get("yes_ask_dollars"),
+        "no_bid_dollars": market.get("no_bid_dollars"),
+        "no_ask_dollars": market.get("no_ask_dollars"),
+        "last_price_dollars": market.get("last_price_dollars"),
+        "yes_bid_size_fp": market.get("yes_bid_size_fp"),
+        "yes_ask_size_fp": market.get("yes_ask_size_fp"),
         "no_bid": market.get("no_bid"),
         "no_ask": market.get("no_ask"),
-        "volume": market.get("volume"),
-        "volume_24h": market.get("volume_24h"),
+        "volume_fp": market.get("volume_fp"),
+        "volume_24h_fp": market.get("volume_24h_fp"),
+        "open_interest_fp": market.get("open_interest_fp"),
+        "volume": _listed_count(market, "volume_fp", "volume"),
+        "volume_24h": _listed_count(market, "volume_24h_fp", "volume_24h"),
         "close_time": market.get("close_time"),
         "series_ticker": market.get("series_ticker"),
         "event_ticker": market.get("event_ticker"),
@@ -173,7 +214,7 @@ def list_markets(args: dict | None = None) -> dict:
     if category is not None:
         category = category.lower()
         if category not in _CATEGORY_PREFIXES:
-            raise RuntimeError("category must be sports, weather, politics, crypto, macro, or other")
+            raise RuntimeError(f"category must be {_CATEGORY_NAMES}")
     cursor = _optional_text(args, "cursor", 1024)
     ticker = _optional_text(args, "ticker", 128)
     filters = {
@@ -294,7 +335,10 @@ READ_TOOLS = [
             "the list filter name is tickers). That row includes result and any settlement fields Kalshi sent "
             "(settlement_value, settlement_value_dollars, settlement_ts, expiration_value), including a settled market with a null book. "
             "List rows include result and those settlement fields when Kalshi sent them. "
-            "category is sports, weather, politics, crypto, macro, or other and is applied here, not by Kalshi. "
+            "category is sports, weather, politics, elections, entertainment, crypto, macro, or other "
+            "and is applied here, not by Kalshi. "
+            "Rows include volume_fp, volume_24h_fp, and the dollar quote fields from the current Market schema. "
+            "volume and volume_24h are filled from those *_fp fields when the legacy integers are absent. "
             "Pass mve_filter all to include multivariate markets. Pass liquid false to keep null books. "
             "Pass status any to omit the status filter."
         ),
@@ -323,12 +367,16 @@ READ_TOOLS = [
                 },
                 "category": {
                     "type": "string",
-                    "description": "Client prefix filter: sports, weather, politics, crypto, macro, or other.",
+                    "description": (
+                        "Client prefix filter: sports, weather, politics, elections, "
+                        "entertainment, crypto, macro, or other."
+                    ),
                 },
             },
         },
     },
     FIND_BEST_TOOL,
+    SHARD_BALANCE_TOOL,
     APPEND_DECISION_TOOL,
     SUMMARIZE_DECISIONS_TOOL,
     {
@@ -363,6 +411,8 @@ HANDLERS = {
     "exchange_status": exchange_status,
     "list_markets": list_markets,
     "find_best_bets": find_best_bets,
+    "shard_balances": shard_balances,
+    "transfer_between_shards": transfer_between_shards,
     "append_decision": append_decision,
     "summarize_decisions": summarize_decisions,
     "fe_routine": fe_routine,
@@ -377,6 +427,7 @@ def registered_tools() -> list[dict]:
     tools = [*READ_TOOLS, OPEN_ORDERS_TOOL]
     if not safe_mode_enabled():
         tools.extend(MUTATING_TOOLS)
+        tools.append(SHARD_TRANSFER_TOOL)
     return tools
 
 

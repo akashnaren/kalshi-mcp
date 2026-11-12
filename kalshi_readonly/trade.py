@@ -16,7 +16,7 @@ from kalshi_readonly.caps import enforce_open, load_caps, note_open, opening_not
 from kalshi_readonly.guard import require_mutation
 from kalshi_readonly.http import auth_call, auth_get
 from kalshi_readonly.ledger import MIRROR_LEDGER, record_fill
-from kalshi_readonly.score import fee_dome_cents, flb_band, maker_fee_cents, series_fees
+from kalshi_readonly.score import fee_dome_cents, flb_band, maker_fee_cents, resolved_fees
 
 _COUNT_RE = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d{1,2})?$")
 _PRICE_RE = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d{1,4})?$")
@@ -261,7 +261,7 @@ def _execution_echo(
 ) -> dict:
     """Fee and role for the proof log. day_spend_remaining comes from the book just loaded."""
     out = dict(result)
-    m_taker, m_maker, source = series_fees({"ticker": ticker})
+    m_taker, m_maker, source = resolved_fees({"ticker": ticker})
     maker = post_only is True
     out["role"] = "maker" if maker else "taker"
     out["m_taker"] = format(m_taker, "f")

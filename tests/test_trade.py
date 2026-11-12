@@ -14,7 +14,8 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from kalshi_readonly.auth import AUTH_ERROR
 from kalshi_readonly.caps import reset_ledger
 from kalshi_readonly.guard import CONFIRM_ERROR, SAFE_MODE_ERROR
-from kalshi_readonly.stdio import run_server
+from kalshi_readonly.shards import SHARD_TRANSFER_TOOL
+from kalshi_readonly.stdio import public_error, run_server
 from kalshi_readonly.tools import HANDLERS, registered_tools
 from kalshi_readonly.trade import (
     MUTATING_TOOLS,
@@ -130,7 +131,7 @@ def _verify(key: rsa.RSAPrivateKey, req: urllib.request.Request, method: str) ->
 
 
 def test_confirm_schema_does_not_set_confirm() -> None:
-    for tool in MUTATING_TOOLS:
+    for tool in [*MUTATING_TOOLS, SHARD_TRANSFER_TOOL]:
         confirm = tool["inputSchema"]["properties"]["confirm"]
         assert "default" not in confirm
         assert "const" not in confirm
@@ -143,7 +144,7 @@ def test_catalog_has_no_transfer_or_strategy_tools(monkeypatch: pytest.MonkeyPat
     blob = " ".join(names)
     assert "withdraw" not in blob
     assert "deposit" not in blob
-    assert "transfer" not in blob
+    assert [name for name in names if "transfer" in name] == ["transfer_between_shards"]
     for banned in ("max_profit", "auto_trade", "batch"):
         assert banned not in blob
 
@@ -159,6 +160,7 @@ def test_safe_mode_defaults_on_and_hides_mutations(monkeypatch: pytest.MonkeyPat
         "exchange_status",
         "list_markets",
         "find_best_bets",
+        "shard_balances",
         "append_decision",
         "summarize_decisions",
         "cash_or_positions",
@@ -172,7 +174,13 @@ def test_safe_mode_defaults_on_and_hides_mutations(monkeypatch: pytest.MonkeyPat
 def test_safe_mode_off_registers_trade_tools(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     monkeypatch.setenv("KALSHI_SAFE_MODE", raw)
     names = [tool["name"] for tool in registered_tools()]
-    assert names[-4:] == ["place_order", "cancel_order", "amend_order", "decrease_order"]
+    assert names[-5:] == [
+        "place_order",
+        "cancel_order",
+        "amend_order",
+        "decrease_order",
+        "transfer_between_shards",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -584,3 +592,41 @@ def test_place_echoes_ledger_fields_and_appends_a_fill(monkeypatch: pytest.Monke
     assert line["parent_id"] == decision_id
     assert line["side"] == "yes"
     assert "$2" in line["notes"]
+
+
+def test_place_order_surfaces_shard_balance_and_inactive_markets(monkeypatch: pytest.MonkeyPatch) -> None:
+    _auth(monkeypatch)
+    _enable_trading(monkeypatch)
+    state = {"code": "insufficient_shard_balance", "shard_id": 2}
+
+    def fake_open(req: urllib.request.Request, timeout: float = 20):
+        if req.get_method() == "GET":
+            return _empty_book()
+        error = {
+            "code": state["code"],
+            "message": "fund this shard with an intra account transfer",
+            "details": "API orders are not funded automatically",
+        }
+        if state["shard_id"] is not None:
+            error["shard_id"] = state["shard_id"]
+        body = json.dumps({"error": error}).encode()
+        raise urllib.error.HTTPError(req.full_url, 400, "bad", Message(), io.BytesIO(body))
+
+    monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
+    with pytest.raises(RuntimeError) as shard_error:
+        place_order(_PLACE)
+    shard_text = public_error(shard_error.value)
+    assert "insufficient_shard_balance" in shard_text
+    assert "shard_id=2" in shard_text
+    assert "intra account transfer" in shard_text
+
+    state["code"] = "market_closed"
+    state["shard_id"] = None
+    with pytest.raises(RuntimeError) as closed_error:
+        place_order(_PLACE)
+    state["code"] = "market_inactive"
+    with pytest.raises(RuntimeError) as inactive_error:
+        place_order(_PLACE)
+    assert public_error(inactive_error.value) == public_error(closed_error.value)
+    assert "market_closed" in public_error(inactive_error.value)
+    assert "market_inactive" not in public_error(inactive_error.value)
