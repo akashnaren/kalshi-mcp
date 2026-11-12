@@ -1,8 +1,8 @@
-"""Bounded public market reads. One list call per page. Beliefs are one batched call.
+"""Bounded market reads. One list call per page. Beliefs are one batched call.
 
-Scan pages share one in-flight request so concurrent find_best_bets calls do
-not stampede GET /markets. A later page that is rate limited keeps the pages
-already fetched.
+Scan pages are signed and share one in-flight request so concurrent
+find_best_bets calls do not stampede. A later page that is rate limited keeps
+the pages already fetched. A series list uses GET /events with nested markets.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from kalshi_readonly.http import RateLimitedError, public_get
+from kalshi_readonly.http import RateLimitedError, auth_get, public_get
 
 _TTL_SECONDS = 300.0
 _PARTIAL_TTL_SECONDS = 60.0
@@ -43,6 +43,8 @@ _KEEP = (
     "close_time",
     "expected_expiration_time",
     "latest_expiration_time",
+    "can_close_early",
+    "fee_waiver_expiration_time",
     "notional_value_dollars",
     "series_ticker",
     "fee_multiplier",
@@ -52,6 +54,13 @@ _KEEP = (
 
 _cache: dict[str, tuple[float, list[dict], int, bool]] = {}
 _lock = threading.Lock()
+
+# GET /events limit maximum is 200.
+# https://docs.kalshi.com/api-reference/events/get-events
+_EVENTS_PAGE_MAX = 200
+# Series-scoped GET /markets allows 1000.
+# https://docs.kalshi.com/api-reference/market/get-markets
+_SERIES_MARKETS_PAGE_MAX = 1000
 
 
 @dataclass(frozen=True)
@@ -102,7 +111,15 @@ def _rows(data: dict) -> list[dict]:
     return markets
 
 
-def _scan(max_pages: int, page_size: int) -> tuple[list[dict], int, int, bool]:
+def _signed_get(path: str, query: dict[str, object]) -> dict:
+    """Scan reads are signed so they use the authenticated Read budget.
+
+    https://docs.kalshi.com/getting_started/rate_limits
+    """
+    return auth_get(path, query)
+
+
+def _scan_open(max_pages: int, page_size: int) -> tuple[list[dict], int, int, bool]:
     markets: list[dict] = []
     seen: set[str] = set()
     pages = 0
@@ -117,7 +134,7 @@ def _scan(max_pages: int, page_size: int) -> tuple[list[dict], int, int, bool]:
         if cursor:
             query["cursor"] = cursor
         try:
-            data = public_get("/markets", query)
+            data = _signed_get("/markets", query)
         except RateLimitedError:
             if pages == 0:
                 raise
@@ -134,6 +151,106 @@ def _scan(max_pages: int, page_size: int) -> tuple[list[dict], int, int, bool]:
             break
         cursor = raw_cursor
     return markets, pages, requests, False
+
+
+def _event_rows(data: dict) -> list[dict]:
+    events = data.get("events")
+    if not isinstance(events, list):
+        raise RuntimeError("unexpected events payload")
+    nested: list[dict] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        batch = event.get("markets")
+        if not isinstance(batch, list):
+            continue
+        series = event.get("series_ticker")
+        for row in batch:
+            if not isinstance(row, dict):
+                continue
+            if isinstance(series, str) and series and not row.get("series_ticker"):
+                row = dict(row)
+                row["series_ticker"] = series
+            nested.append(row)
+    return _rows({"markets": nested})
+
+
+def _series_request(series: str, page_size: int, cursor: str) -> tuple[str, dict[str, object]]:
+    """One series page. Does not send min_close_ts or max_close_ts.
+
+    Those timestamps do not work combined with status=open.
+    https://docs.kalshi.com/changelog
+
+    Nested events are the series scan when the page fits in 200.
+    https://docs.kalshi.com/api-reference/events/get-events
+    A larger series-scoped page uses GET /markets, whose limit max is 1000.
+    https://docs.kalshi.com/api-reference/market/get-markets
+    """
+    if page_size > _EVENTS_PAGE_MAX:
+        query: dict[str, object] = {
+            "series_ticker": series,
+            "status": "open",
+            "limit": min(page_size, _SERIES_MARKETS_PAGE_MAX),
+            "mve_filter": "exclude",
+        }
+        path = "/markets"
+    else:
+        query = {
+            "series_ticker": series,
+            "with_nested_markets": "true",
+            "status": "open",
+            "limit": page_size,
+        }
+        path = "/events"
+    if cursor:
+        query["cursor"] = cursor
+    return path, query
+
+
+def _scan_series(
+    series_tickers: list[str],
+    max_pages: int,
+    page_size: int,
+) -> tuple[list[dict], int, int, bool]:
+    markets: list[dict] = []
+    seen: set[str] = set()
+    pages = 0
+    requests = 0
+    for series in series_tickers:
+        cursor = ""
+        series_pages = 0
+        while series_pages < max_pages:
+            path, query = _series_request(series, page_size, cursor)
+            try:
+                data = _signed_get(path, query)
+            except RateLimitedError:
+                if pages == 0:
+                    raise
+                return markets, pages, requests, True
+            requests += 1
+            pages += 1
+            series_pages += 1
+            rows = _rows(data) if path == "/markets" else _event_rows(data)
+            for row in rows:
+                ticker = row["ticker"]
+                if ticker not in seen:
+                    seen.add(ticker)
+                    markets.append(row)
+            raw_cursor = data.get("cursor")
+            if not isinstance(raw_cursor, str) or not raw_cursor:
+                break
+            cursor = raw_cursor
+    return markets, pages, requests, False
+
+
+def _scan(
+    max_pages: int,
+    page_size: int,
+    series_tickers: list[str] | None = None,
+) -> tuple[list[dict], int, int, bool]:
+    if series_tickers:
+        return _scan_series(series_tickers, max_pages, page_size)
+    return _scan_open(max_pages, page_size)
 
 
 def _by_tickers(tickers: list[str]) -> tuple[list[dict], int, int]:
@@ -169,9 +286,17 @@ def _copy(loaded: Loaded, *, cache: str, requests: int) -> Loaded:
     )
 
 
-def _fetch(key: str, *, tickers: list[str] | None, max_pages: int, page_size: int, scan: bool) -> Loaded:
+def _fetch(
+    key: str,
+    *,
+    tickers: list[str] | None,
+    max_pages: int,
+    page_size: int,
+    scan: bool,
+    series_tickers: list[str] | None = None,
+) -> Loaded:
     if scan:
-        markets, pages, requests, rate_limited = _scan(max_pages, page_size)
+        markets, pages, requests, rate_limited = _scan(max_pages, page_size, series_tickers)
     else:
         markets, pages, requests = _by_tickers(list(tickers or []))
         rate_limited = False
@@ -185,8 +310,18 @@ def _fetch(key: str, *, tickers: list[str] | None, max_pages: int, page_size: in
     )
 
 
-def load_markets(*, tickers: list[str] | None, max_pages: int, page_size: int, scan: bool) -> Loaded:
-    if scan:
+def load_markets(
+    *,
+    tickers: list[str] | None,
+    max_pages: int,
+    page_size: int,
+    scan: bool,
+    series_tickers: list[str] | None = None,
+) -> Loaded:
+    series = [item for item in (series_tickers or []) if item]
+    if scan and series:
+        key = "series|" + ",".join(series) + f"|{page_size}|{max_pages}"
+    elif scan:
         key = f"scan|{page_size}|{max_pages}"
     else:
         key = "tickers|" + ",".join(tickers or [])
@@ -213,7 +348,14 @@ def load_markets(*, tickers: list[str] | None, max_pages: int, page_size: int, s
             raise RuntimeError("market scan failed")
         return _copy(flight.result, cache="hit", requests=0)
     try:
-        loaded = _fetch(key, tickers=tickers, max_pages=max_pages, page_size=page_size, scan=scan)
+        loaded = _fetch(
+            key,
+            tickers=tickers,
+            max_pages=max_pages,
+            page_size=page_size,
+            scan=scan,
+            series_tickers=series,
+        )
         flight.result = loaded
         return loaded
     except BaseException as exc:

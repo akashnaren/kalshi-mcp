@@ -237,6 +237,84 @@ def test_403_nested_error_surfaces_code_and_message(monkeypatch: pytest.MonkeyPa
     assert sleeps == []
 
 
+def test_429_without_retry_after_adds_jitter(monkeypatch: pytest.MonkeyPatch, sleeps: list[float]) -> None:
+    """Kalshi 429 responses carry no Retry-After, so the wait is backoff plus jitter.
+
+    https://docs.kalshi.com/getting_started/rate_limits
+    """
+    monkeypatch.setattr("kalshi_readonly.http._jitter", lambda: 0.2)
+    calls = {"n": 0}
+
+    def fake_open(req: urllib.request.Request, timeout: float = 20):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _http_error(req, 429, b'{"message":"slow down"}')
+        return _Body({"ok": True})
+
+    monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
+    assert public_get("/exchange/status") == {"ok": True}
+    assert sleeps == [2.2]
+
+
+def test_market_inactive_matches_market_closed(monkeypatch: pytest.MonkeyPatch, sleeps: list[float]) -> None:
+    code = {"value": "market_closed"}
+
+    def fake_open(req: urllib.request.Request, timeout: float = 20):
+        body = json.dumps({"error": {"code": code["value"], "message": "not trading"}}).encode()
+        raise _http_error(req, 400, body)
+
+    monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
+    with pytest.raises(RuntimeError) as closed:
+        public_get("/portfolio/events/orders")
+    code["value"] = "market_inactive"
+    with pytest.raises(RuntimeError) as inactive:
+        public_get("/portfolio/events/orders")
+    assert str(inactive.value) == str(closed.value)
+    assert "market_closed: not trading" in str(inactive.value)
+    assert "market_inactive" not in str(inactive.value)
+    assert sleeps == []
+
+
+def test_insufficient_shard_balance_names_the_shard(monkeypatch: pytest.MonkeyPatch, sleeps: list[float]) -> None:
+    body = json.dumps(
+        {
+            "error": {
+                "code": "insufficient_shard_balance",
+                "message": "fund this shard with an intra account transfer",
+                "details": "API orders are not funded automatically",
+                "shard_id": 2,
+            }
+        }
+    ).encode()
+
+    def fake_open(req: urllib.request.Request, timeout: float = 20):
+        raise _http_error(req, 400, body)
+
+    monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
+    with pytest.raises(RuntimeError) as caught:
+        public_get("/portfolio/events/orders")
+    text = str(caught.value)
+    assert "insufficient_shard_balance" in text
+    assert "shard_id=2" in text
+    assert "fund this shard with an intra account transfer" in text
+    assert "API orders are not funded automatically" in text
+    assert sleeps == []
+
+
+def test_exchange_index_is_surfaced_as_shard_id(monkeypatch: pytest.MonkeyPatch, sleeps: list[float]) -> None:
+    body = json.dumps(
+        {"error": {"code": "insufficient_shard_balance", "message": "unfunded", "exchange_index": 0}}
+    ).encode()
+
+    def fake_open(req: urllib.request.Request, timeout: float = 20):
+        raise _http_error(req, 400, body)
+
+    monkeypatch.setattr("kalshi_readonly.http._open", fake_open)
+    with pytest.raises(RuntimeError, match=r"shard_id=0"):
+        public_get("/portfolio/events/orders")
+    assert sleeps == []
+
+
 def test_400_does_not_retry(monkeypatch: pytest.MonkeyPatch, sleeps: list[float]) -> None:
     calls = {"n": 0}
 

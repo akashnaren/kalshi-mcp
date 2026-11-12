@@ -73,7 +73,13 @@ def _clear_caches():
     clear_market_cache()
 
 
-def _patch_markets(monkeypatch: pytest.MonkeyPatch, payload: dict | None = None, *, cursor: str = ""):
+def _patch_markets(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict | None = None,
+    *,
+    cursor: str = "",
+    signed: bool = False,
+):
     calls: list[dict] = []
 
     def fake_public_get(path: str, query: dict | None = None):
@@ -81,7 +87,8 @@ def _patch_markets(monkeypatch: pytest.MonkeyPatch, payload: dict | None = None,
         calls.append(dict(query or {}))
         return {"markets": list(payload if payload is not None else MARKETS), "cursor": cursor}
 
-    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    target = "kalshi_readonly.markets.auth_get" if signed else "kalshi_readonly.markets.public_get"
+    monkeypatch.setattr(target, fake_public_get)
     return calls
 
 
@@ -161,7 +168,7 @@ def test_find_best_bets_prices_no_off_the_no_ask(monkeypatch: pytest.MonkeyPatch
 
 
 def test_find_best_bets_reads_the_clock_when_now_is_omitted(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _patch_markets(monkeypatch, [])
+    calls = _patch_markets(monkeypatch, [], signed=True)
     out = find_best_bets({"max_pages": 1, "page_size": 1})
     assert len(calls) == 1
     assert out["places_orders"] is False
@@ -180,7 +187,7 @@ def test_find_best_bets_is_a_read_while_safe_mode_defaults_on(monkeypatch: pytes
 
 
 def test_scan_defaults_to_one_page(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _patch_markets(monkeypatch, cursor="more")
+    calls = _patch_markets(monkeypatch, cursor="more", signed=True)
     out = find_best_bets({}, now=NOW)
     assert len(calls) == 1
     assert calls[0]["limit"] == 100
@@ -203,7 +210,7 @@ def test_later_page_rate_limit_returns_partial_queue(monkeypatch: pytest.MonkeyP
         ticker = f"M{len(calls)}"
         return {"markets": [_market(ticker, yes_ask="0.2000", close="2026-10-02T15:00:00Z")], "cursor": "more"}
 
-    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    monkeypatch.setattr("kalshi_readonly.markets.auth_get", fake_public_get)
     first = find_best_bets({"max_pages": 2, "page_size": 50}, now=NOW)
     assert first["rate_limited"] is True
     assert first["places_orders"] is False
@@ -230,7 +237,7 @@ def test_first_page_rate_limit_fails_the_tool(monkeypatch: pytest.MonkeyPatch) -
     def fake_public_get(path: str, query: dict | None = None):
         raise RateLimitedError("rate_limited: Kalshi GET /markets failed: 429")
 
-    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    monkeypatch.setattr("kalshi_readonly.markets.auth_get", fake_public_get)
     with pytest.raises(RateLimitedError, match="^rate_limited:"):
         find_best_bets({"max_pages": 2, "page_size": 50}, now=NOW)
 
@@ -256,7 +263,7 @@ def test_concurrent_scans_share_one_flight(monkeypatch: pytest.MonkeyPatch) -> N
         assert release.wait(3)
         return {"markets": [_market("ONLY", yes_ask="0.2000", close="2026-10-02T15:00:00Z")], "cursor": ""}
 
-    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    monkeypatch.setattr("kalshi_readonly.markets.auth_get", fake_public_get)
     buckets: list[list] = [[], []]
 
     def run(index: int) -> None:
@@ -295,7 +302,7 @@ def test_find_best_bets_stops_at_max_pages_and_reuses_cache(monkeypatch: pytest.
             "cursor": "more",
         }
 
-    monkeypatch.setattr("kalshi_readonly.markets.public_get", fake_public_get)
+    monkeypatch.setattr("kalshi_readonly.markets.auth_get", fake_public_get)
     first = find_best_bets({"max_pages": 2, "page_size": 50}, now=NOW)
     assert len(calls) == 2
     assert calls[1]["cursor"] == "more"
@@ -353,6 +360,7 @@ def test_recommend_cli_dry_run_fixture_does_not_call_http(monkeypatch: pytest.Mo
         raise AssertionError("http was called")
 
     monkeypatch.setattr("kalshi_readonly.markets.public_get", boom)
+    monkeypatch.setattr("kalshi_readonly.markets.auth_get", boom)
     monkeypatch.setattr("kalshi_readonly.http.auth_call", boom)
     assert recommend_main(["--fixture", str(FIXTURE)]) == 0
     out = json.loads(capsys.readouterr().out)

@@ -98,6 +98,7 @@ def find_best_bets(args: dict | None = None, *, now: datetime | None = None) -> 
             max_pages=options.max_pages,
             page_size=options.page_size,
             scan=True,
+            series_tickers=list(options.series_tickers),
         )
         research, counts = research_queue(loaded.markets, options, moment)
         ranked = []
@@ -179,11 +180,12 @@ FIND_BEST_TOOL = {
     "description": (
         "Read-only ranking of open Kalshi markets. "
         "Score is estimated_confidence times payout_ratio divided by stake_needed. "
-        "Each row reports fee_cents_est after a series lookup "
-        "(taker ceil(M_taker*0.07*C*P*(1-P)), maker ceil(M_maker*0.0175*C*P*(1-P)); "
-        "NFL, MLB, Fed, and CPI are usually 1/1, weather is often 1/0 by inference, "
-        "some crypto year-end is 0/0, and an unlisted series is taker 1 and maker 0). "
-        "A payload fee_multiplier overrides both sides. "
+        "Each row reports fee_cents_est from GET /series fee_type and fee_multiplier when that call succeeds. "
+        "quadratic has no maker fee. quadratic_with_maker_fees uses the 0.0175 maker rate. "
+        "The prefix catalog is the fallback when the series call fails "
+        "(taker ceil(M_taker*0.07*C*P*(1-P)), maker ceil(M_maker*0.0175*C*P*(1-P))). "
+        "Pass series_tickers to scan those series instead of the open page of sports props. "
+        "Scan reads are signed. series_tickers page_size may be 1 to 1000. "
         "edge_net_cents is after that taker dome and a depth haircut, then flb_band, kelly_frac 0.25, stake_mode, "
         "maker_flag and side_exec (SIDE_EXEC), spread_cents, depth_at_ask, "
         "days_to_res (DAYS_TO_RES), corr_group_hint, and hold_to_res_default (HOLD_TO_RES_DEFAULT). "
@@ -241,7 +243,19 @@ FIND_BEST_TOOL = {
                 },
             },
             "max_pages": {"type": "integer", "description": "Scan pages when beliefs are omitted. 1 to 4. Default 1."},
-            "page_size": {"type": "integer", "description": "Markets per scan page. 1 to 200. Default 100."},
+            "series_tickers": {
+                "type": "array",
+                "description": (
+                    "Series tickers for the scan, for example KXHIGHNY. "
+                    "One signed GET /events?series_ticker=&with_nested_markets=true per page. "
+                    "Page size above 200 uses signed GET /markets?series_ticker= (limit up to 1000)."
+                ),
+                "items": {"type": "string"},
+            },
+            "page_size": {
+                "type": "integer",
+                "description": "Markets per scan page. 1 to 200, or 1 to 1000 when series_tickers is set. Default 100.",
+            },
             "min_volume": {
                 "type": "number",
                 "description": "Weaker 24h volume proxy in contracts. Default 20. Lifetime volume is separate.",

@@ -13,7 +13,7 @@ Someone wants a ranked Kalshi idea, not an order. The longer checklist is `harne
 
 ## Sequence
 1. Keep `KALSHI_SAFE_MODE` on. This tool does not trade.
-2. Call `find_best_bets`. Omit beliefs to get a research queue. Pass beliefs only after you can name evidence and your confidence in `yes` or `no` is high.
+2. Call `find_best_bets`. Omit beliefs to get a research queue. Pass `series_tickers` (for example `KXHIGHNY`) when the open page would be sports props. Pass beliefs only after you can name evidence and your confidence in `yes` or `no` is high.
 3. Read `recommendations` for rationale, assumed edge, and suggested max dollars risked. A research-queue row is not a bet. If `rate_limited` is true, keep the partial `research_queue` and do not scan again immediately.
 4. The tool does not place. On the Finance Engineer host (`KALSHI_SAFE_MODE=0`), a surviving row may be placed with `place_order`, `confirm: true`, and `corr_group`, inside the caps. Fleet hosts stay at `KALSHI_SAFE_MODE=1`. The default scan is one page.
 

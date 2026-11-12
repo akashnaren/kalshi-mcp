@@ -1,4 +1,8 @@
-"""Rank markets by confidence, payout, and stake. No HTTP and no orders."""
+"""Rank markets by confidence, payout, and stake. Orders are not placed here.
+
+Series fees are read from GET /series when that call succeeds. The prefix
+catalog below is only the fallback. See kalshi_readonly.fees.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +10,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN
+
+from kalshi_readonly.fees import live_schedule
 
 DO_NOT_PLACE = "Finance Engineer may place under the caps with confirm true"
 LONGSHOT_NET_CENTS = Decimal(8)
@@ -132,6 +138,19 @@ def series_fees(market: dict | None) -> tuple[Decimal, Decimal, str]:
     if best is None:
         return Decimal(1), Decimal(0), "default"
     return best[1], best[2], best[3]
+
+
+def resolved_fees(market: dict | None, now: datetime | None = None) -> tuple[Decimal, Decimal, str]:
+    """Live series schedule, else the prefix catalog when that GET fails.
+
+    https://docs.kalshi.com/api-reference/market/get-series
+    https://kalshi.com/docs/kalshi-fee-schedule.pdf
+    """
+    moment = now if now is not None else datetime.now(timezone.utc)
+    live = live_schedule(market, moment)
+    if live is not None:
+        return live
+    return series_fees(market)
 
 
 def fee_dome_cents(
@@ -269,6 +288,7 @@ class Options:
     limit: int = 5
     max_pages: int = 1
     page_size: int = 100
+    series_tickers: tuple[str, ...] = ()
     min_price: Decimal = Decimal("0.02")
     price_ceiling: Decimal = Decimal("0.85")
 
@@ -338,11 +358,45 @@ def _decimal_arg(args: dict, field: str, default: Decimal, low: Decimal, high: D
     return value
 
 
+def _series_arg(args: dict) -> tuple[str, ...]:
+    """Exact series tickers. KXHIGHNY is one city series, not a glob."""
+    if "series_tickers" not in args or args["series_tickers"] in (None, ""):
+        return ()
+    raw = args["series_tickers"]
+    if isinstance(raw, str):
+        parts = [part.strip() for part in raw.split(",") if part.strip()]
+    elif isinstance(raw, list):
+        parts = []
+        for item in raw:
+            if not isinstance(item, str) or not item.strip():
+                raise RuntimeError("series_tickers must be a list of series tickers")
+            parts.append(item.strip())
+    else:
+        raise RuntimeError("series_tickers must be a list of series tickers")
+    if len(parts) > 32:
+        raise RuntimeError("series_tickers must contain at most 32 series")
+    found: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        if _TICKER_RE.fullmatch(part) is None:
+            raise RuntimeError("series_tickers must be series tickers")
+        key = part.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(key)
+    return tuple(found)
+
+
 def parse_options(args: dict) -> Options:
     min_hours = _decimal_arg(args, "min_hours_to_expiry", Decimal("2"), Decimal("0"), Decimal("168"))
     max_hours = _decimal_arg(args, "max_hours_to_expiry", Decimal("1440"), Decimal("1"), Decimal("8760"))
     if max_hours <= min_hours:
         raise RuntimeError("max_hours_to_expiry must be greater than min_hours_to_expiry")
+    series = _series_arg(args)
+    # Series-scoped GET /markets allows 1000. Unscoped scans stay at 200.
+    # https://docs.kalshi.com/api-reference/market/get-markets
+    page_high = 1000 if series else 200
     return Options(
         min_volume=_decimal_arg(args, "min_volume", Decimal("20"), Decimal("0"), Decimal("1000000")),
         min_lifetime_volume=_decimal_arg(
@@ -357,7 +411,8 @@ def parse_options(args: dict) -> Options:
         max_risk=_decimal_arg(args, "max_risk_dollars", Decimal("5"), Decimal("1"), Decimal("25")),
         limit=_int_arg(args, "limit", 5, 1, 10),
         max_pages=_int_arg(args, "max_pages", 1, 1, 4),
-        page_size=_int_arg(args, "page_size", 100, 1, 200),
+        page_size=_int_arg(args, "page_size", 100, 1, page_high),
+        series_tickers=series,
     )
 
 
@@ -531,10 +586,22 @@ def _notional(market: dict) -> Decimal:
 
 
 def _expiry(market: dict, now: datetime) -> tuple[float, str] | None:
-    for key in ("close_time", "expected_expiration_time", "latest_expiration_time"):
-        parsed = parse_time(market.get(key))
-        if parsed is not None:
-            return (parsed - now).total_seconds() / 3600, market.get(key) if isinstance(market.get(key), str) else parsed.isoformat()
+    """Hours until resolution, and the timestamp that produced them.
+
+    expected_expiration_time is the forecast. close_time can move earlier when
+    can_close_early is set, so it is used only when the forecast is missing.
+    https://docs.kalshi.com/getting_started/market_lifecycle
+    """
+    expected = parse_time(market.get("expected_expiration_time"))
+    if expected is not None:
+        stamp = market.get("expected_expiration_time")
+        text = stamp if isinstance(stamp, str) else expected.isoformat()
+        return (expected - now).total_seconds() / 3600, text
+    close = parse_time(market.get("close_time"))
+    if close is not None:
+        stamp = market.get("close_time")
+        text = stamp if isinstance(stamp, str) else close.isoformat()
+        return (close - now).total_seconds() / 3600, text
     return None
 
 
@@ -696,6 +763,7 @@ def _row(
     screened: dict,
     options: Options,
     passed: list[str],
+    now: datetime,
 ) -> tuple[dict | None, str | None, dict]:
     values = _quote_values(screened)
     confidence: Decimal = belief["confidence"]
@@ -714,7 +782,7 @@ def _row(
     if match is not None and match < 1:
         return None, "skipped_settlement", values
     payload_m = series_multiplier(market)
-    m_taker, m_maker, fee_source = series_fees(market)
+    m_taker, m_maker, fee_source = resolved_fees(market, now)
     exec_side = side_exec_for(screened["stake"], screened.get("bid"))
     fee_one = fee_dome_cents(screened["stake"], Decimal(1), multiplier=m_taker)
     fee_est = (
@@ -832,7 +900,8 @@ def _row(
         "fee_dome": (
             "ceil(M_taker * 0.07 * contracts * price * (1 - price)) cents; "
             "maker is ceil(M_maker * 0.0175 * contracts * price * (1 - price)). "
-            "Series lookup before the score. No settlement fee."
+            "GET /series fee_type and fee_multiplier when that call succeeds. "
+            "quadratic has no maker fee. The prefix catalog is the fallback. No settlement fee."
         ),
         "kelly_frac": "0.25",
         "stake_mode": stake_mode_for(screened["stake"]),
@@ -868,6 +937,7 @@ def _drop_dominated_yes(
     ranked: list[dict],
     by_ticker: dict[str, dict],
     counts: dict[str, int],
+    now: datetime,
 ) -> tuple[list[dict], list[dict]]:
     """Drop a yes buy when the yes mids in that event sum above 1 plus fees."""
     legs: dict[str, list[tuple[str, Decimal, Decimal]]] = {}
@@ -881,7 +951,7 @@ def _drop_dominated_yes(
         if bid is None or ask is None:
             continue
         mid = (bid + ask) / Decimal(2)
-        m_taker, _m_maker, _source = series_fees(market)
+        m_taker, _m_maker, _source = resolved_fees(market, now)
         fee = fee_dome_cents(mid, Decimal(1), multiplier=m_taker) / Decimal(100)
         legs.setdefault(event, []).append((ticker, mid, fee))
     dominated: set[str] = set()
@@ -964,13 +1034,13 @@ def rank_markets(
             counts[reason or "skipped_market"] += 1
             skipped.append(_skip_row(belief, reason, passed, values))
             continue
-        row, reason, values = _row(market, belief, screened, options, passed)
+        row, reason, values = _row(market, belief, screened, options, passed, now)
         if row is None:
             counts[reason or "skipped_market"] += 1
             skipped.append(_skip_row(belief, reason, passed, values))
             continue
         ranked.append(row)
-    ranked, dominated = _drop_dominated_yes(ranked, by_ticker, counts)
+    ranked, dominated = _drop_dominated_yes(ranked, by_ticker, counts, now)
     skipped.extend(dominated)
     # Maker quotes whose taker fee is within 2 cents sort one score quantum ahead.
     # The displayed score stays estimated_confidence * payout_ratio / stake_needed.
@@ -1073,4 +1143,5 @@ def filters_payload(options: Options) -> dict[str, str | int]:
         "limit": options.limit,
         "max_pages": options.max_pages,
         "page_size": options.page_size,
+        "series_tickers": ",".join(options.series_tickers),
     }
