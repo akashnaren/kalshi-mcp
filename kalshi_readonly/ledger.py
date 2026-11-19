@@ -134,6 +134,23 @@ def _allowed(field: str, allowed: tuple[str, ...]) -> str:
     return f"{field} must be one of the allowed values: {', '.join(allowed)}"
 
 
+_NULLISH_GATE = frozenset({"", "null", "none"})
+_REPR_LIMIT = 80
+
+
+def _truncated_repr(value: object) -> str:
+    text = repr(value)
+    if len(text) <= _REPR_LIMIT:
+        return text
+    return text[: _REPR_LIMIT - 3] + "..."
+
+
+def _nullish_failed_gate(value: object) -> bool:
+    if value is None:
+        return True
+    return isinstance(value, str) and value.strip().lower() in _NULLISH_GATE
+
+
 def _string_list(value: object, field: str) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
         raise RuntimeError(f"{field} must be a list of strings")
@@ -243,12 +260,18 @@ def _validate_decision(row: dict) -> None:
         if not failed:
             raise RuntimeError("a skip needs a non-empty gates_failed")
         if not isinstance(failed_gate, str) or failed_gate not in failed:
-            raise RuntimeError("failed_gate must be one of gates_failed")
+            raise RuntimeError(
+                "failed_gate must be one of gates_failed "
+                f"(got {_truncated_repr(failed_gate)}, allowed {failed})"
+            )
     else:
         if failed:
             raise RuntimeError("a place has an empty gates_failed")
-        if failed_gate not in (None,):
-            raise RuntimeError("a place has failed_gate null")
+        if not _nullish_failed_gate(failed_gate):
+            raise RuntimeError(
+                f"a place must have failed_gate null (got {_truncated_repr(failed_gate)})"
+            )
+        row["failed_gate"] = None
         if row.get("confirm") is not True:
             raise RuntimeError("a place requires confirm true")
         _number(row.get("stake_dollars"), "stake_dollars", low=Decimal("0.01"), high=Decimal("100000"))
@@ -614,7 +637,8 @@ APPEND_DECISION_TOOL = {
         "Finance Engineer mirrors that file to /workspace/state/kalshi/ledger/decisions.jsonl. "
         "place and skip need id, as_of (ISO with timezone, Pacific Time expected), ticker, side, "
         "corr_group, category, belief_conf, model_sources, evidence_summary, gates_passed, gates_failed, "
-        "failed_gate, logic_path, and rank_source. A place also needs confirm true, stake_dollars, count, and price. "
+        "failed_gate (null for place), logic_path, and rank_source. "
+        "A place also needs confirm true, stake_dollars, count, and price. "
         "flb_band (price band) allowed values: <10¢, 10–25¢, 25–75¢, 75–90¢, ≥90¢ (>=90¢ accepted). "
         "rank_source allowed values: find_best_bets, fe_manual."
     ),
@@ -638,6 +662,10 @@ APPEND_DECISION_TOOL = {
                         "type": "string",
                         "enum": list(RANK_SOURCES),
                         "description": "Rank source. Allowed: find_best_bets, fe_manual.",
+                    },
+                    "failed_gate": {
+                        "type": ["string", "null"],
+                        "description": "Skip reason from gates_failed. null for place.",
                     },
                 },
             },
