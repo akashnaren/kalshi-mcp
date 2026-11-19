@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from kalshi_readonly.ledger import append_decision, summarize_decisions
+from kalshi_readonly.dispatch import handle
+from kalshi_readonly.ledger import APPEND_DECISION_TOOL, append_decision, summarize_decisions
 from kalshi_readonly.recommend import find_best_bets
 from kalshi_readonly.tools import list_markets
 
@@ -231,6 +232,82 @@ def test_find_best_bets_rows_carry_gates(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "exchange_trading_active" in skipped[0]["gates_passed"]
     assert skipped[0]["flb_band"] == "≥90¢"
     assert out["counts"]["skipped_price"] == 1
+
+
+def test_place_accepts_nullish_failed_gate_and_stores_null(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _state(monkeypatch, tmp_path)
+    schema = APPEND_DECISION_TOOL["inputSchema"]["properties"]["record"]["properties"]["failed_gate"]
+    assert schema["type"] == ["string", "null"]
+    assert "null for place" in schema["description"]
+    assert "null for place" in APPEND_DECISION_TOOL["description"]
+
+    cases: list[tuple[str, object | None]] = [
+        ("null", None),
+        ("omitted", "__omit__"),
+        ("empty", ""),
+        ("null-str", "null"),
+        ("none-str", "None"),
+    ]
+    for index, (label, value) in enumerate(cases, start=1):
+        record = dict(_PLACE)
+        record["id"] = f"20260930-18000{index}-KXHIGHCHI-26SEP30-yes-{index:02d}"
+        record["order_id"] = f"ord-nullish-{label}"
+        if value == "__omit__":
+            del record["failed_gate"]
+        else:
+            record["failed_gate"] = value
+        written = append_decision({"record": record})
+        stored = json.loads(Path(written["path"]).read_text(encoding="utf-8").splitlines()[-1])
+        assert stored["failed_gate"] is None, label
+
+
+def test_place_rejects_non_null_failed_gate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _state(monkeypatch, tmp_path)
+    record = dict(_PLACE)
+    record["failed_gate"] = "price_band"
+    with pytest.raises(RuntimeError, match=r"a place must have failed_gate null \(got 'price_band'\)"):
+        append_decision({"record": record})
+    assert not (tmp_path / "ledger" / "decisions.jsonl").exists()
+
+
+def test_skip_failed_gate_error_includes_value_and_allowed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _state(monkeypatch, tmp_path)
+    record = dict(_seed_lines()[0])
+    record["id"] = "20260930-1712-KXINTLFRIENDLYTOTAL-26SEP30ARGBOL-7-no-99"
+    record["failed_gate"] = "not_a_gate"
+    with pytest.raises(RuntimeError, match=r"failed_gate must be one of gates_failed") as err:
+        append_decision({"record": record})
+    message = str(err.value)
+    assert "got 'not_a_gate'" in message
+    assert "price_band" in message
+    assert "max_price_0.84" in message
+
+
+def test_append_decision_dispatch_preserves_null_failed_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _state(monkeypatch, tmp_path)
+    record = dict(_PLACE)
+    payload = json.loads(
+        json.dumps(
+            {
+                "id": 7,
+                "op": "call",
+                "name": "append_decision",
+                "arguments": {"record": record},
+            }
+        )
+    )
+    assert payload["arguments"]["record"]["failed_gate"] is None
+    out = handle(payload)
+    assert out["ok"] is True
+    assert out["result"]["appended"] is True
+    stored = json.loads(Path(out["result"]["path"]).read_text(encoding="utf-8").splitlines()[-1])
+    assert stored["failed_gate"] is None
 
 
 def test_list_markets_skips_mve_null_books_and_pages(monkeypatch: pytest.MonkeyPatch) -> None:
